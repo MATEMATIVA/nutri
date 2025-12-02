@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Painel Nutricional — Final</title>
+<style>
+:root{
+  --bg:#f6fff6; --accent:#1c6e36; --muted:#e8f7e9; --card:#fff;
+}
+*{box-sizing:border-box}
+body{font-family: "Segoe UI", Roboto, Arial, sans-serif; margin:0; background:var(--bg); color:#122}
+header{background:var(--accent); color:#fff; padding:14px 18px; font-size:22px; font-weight:700}
+#topbar{display:flex;gap:10px;align-items:center;padding:12px;background:var(--muted);border-bottom:2px solid var(--accent);flex-wrap:wrap}
+.select, .search, button{padding:8px;border-radius:8px;border:1px solid #d1e8d7;background:#fff;font-size:14px}
+.btn{background:var(--accent);color:#fff;border:0;cursor:pointer;font-weight:700}
+#main{padding:16px;max-width:1200px;margin:0 auto}
+#results{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,0.04)}
+.list{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
+.thumbbox{background:#fff;padding:12px;border-radius:12px;border:1px solid #e2efe2;text-align:center;cursor:pointer;min-height:150px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+.thumbbox img{width:96px;height:96px;object-fit:cover;margin-bottom:8px;border-radius:10px;background:#fff}
+.thumbbox .name{font-weight:700;color:var(--accent);margin-bottom:6px;text-align:center}
+.thumbbox .meta{font-size:0.9rem;color:#666}
+.placeholder{text-align:center;padding:22px;color:#666}
+#ficha{display:none;margin-top:16px;background:#fff;padding:16px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,0.04)}
+.ficha-top{display:flex;gap:16px;align-items:center;border-bottom:1px solid #eee;padding-bottom:12px}
+.ficha-thumb{width:120px;height:120px;object-fit:cover;border-radius:10px}
+.ficha-name{font-size:1.25rem;color:var(--accent);font-weight:700}
+.subtabs{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}
+.subtab{padding:8px 12px;border-radius:8px;background:#f3faf3;border:1px solid #d6edd6;cursor:pointer;font-weight:700;color:#145}
+.subtab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.grid-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.card{background:#fff;border-radius:10px;padding:10px;border:1px solid #e6f1e6;text-align:center;cursor:pointer;min-height:160px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+.card img{width:96px;height:96px;object-fit:cover;border-radius:8px;margin-bottom:8px}
+.card h4{margin:4px 0;color:var(--accent);text-align:center}
+.card p{margin:0;color:#333;text-align:center}
+.note{color:#666;font-style:italic}
+.small{font-size:0.9rem;color:#444}
+@media(max-width:700px){.ficha-top{flex-direction:column;align-items:flex-start}}
+</style>
+</head>
+<body>
+<header>Painel Nutricional</header>
+
+<div id="topbar">
+  <label class="small" for="mode">Buscar por:</label>
+  <select id="mode" class="select" aria-label="Modo">
+    <option value="alimento">Alimento</option>
+    <option value="nutriente">Nutriente</option>
+    <option value="refeicao">Refeição</option>
+  </select>
+
+  <input id="search" class="search" placeholder="Digite termo (Enter ou Buscar)" style="min-width:280px" />
+
+  <button id="btnSearch" class="btn">Buscar</button>
+
+  <div id="status" style="margin-left:auto;color:#234;font-size:0.95rem">Carregando...</div>
+</div>
+
+<div id="main">
+  <div id="results"><div class="placeholder">Carregando dados...</div></div>
+  <div id="ficha"></div>
+</div>
+
+<script>
+/*
+  painel_nutricao_final.html
+  - Lê "Tabela Principal.tsv" (mesma pasta)
+  - Colunas esperadas (zero-based):
+      0: ID
+      1: Refeição (pares qtd,Nome;...)
+      2: Alimento (nome)
+      3: Composição (pares qtd,ID;...)
+      4..: Nutrientes (nomes no header)
+    Linha 0: header (nomes dos nutrientes a partir da coluna 4)
+    Linha 1: necessidades diárias (valores em mesma ordem)
+    Linhas 2+: alimentos
+  - Imagens:
+      Alimentos: Alide<ID>.png
+      Nutrientes: Nlide<k>.png    (k = 1..)
+      Refeições: Rlide1.png, Rlide2.png, ...
+  - Visão Geral: carrega `Nome.html` ou `encodeURIComponent(Nome).html`
+*/
+
+const FILE = 'Tabela Principal.tsv';
+
+// Data structures
+let nutrientNames = [];   // header from col 4 onward
+let dailyNeeds = [];      // line 1 col 4 onward
+let foods = [];           // {id, name, meals:[{q,meal}], comps:[{q,id}], rowIndex, nutRow}
+let nutrientsMatrix = []; // matrix of raw nutrient values per row (per 100g)
+let mealList = [];        // sorted unique meal names
+let mealIndexByName = {}; // meal -> 1-based index for RlideX.png
+let loaded = false;
+
+// DOM
+const resultsDiv = document.getElementById('results');
+const fichaDiv = document.getElementById('ficha');
+const statusEl = document.getElementById('status');
+const modeEl = document.getElementById('mode');
+const searchEl = document.getElementById('search');
+const btnSearch = document.getElementById('btnSearch');
+
+function esc(s){ return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function norm(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+function parseNumber(v){ if(v===undefined||v===null) return 0; v=String(v).trim(); if(v===''||v==='-') return 0; v=v.replace(',','.'); const n=Number(v); return isNaN(n)?0:n; }
+
+/* ---------------- LOAD TSV ---------------- */
+async function loadTSV(){
+  try{
+    statusEl.textContent = 'Carregando Tabela Principal.tsv ...';
+    const r = await fetch(FILE);
+    if(!r.ok) throw new Error('Arquivo não encontrado: ' + FILE);
+    const txt = await r.text();
+    const lines = txt.replace(/\r\n/g,'\n').split('\n').map(l=>l.split('\t'));
+
+    if(lines.length < 3) throw new Error('TSV precisa ter header, necessidades e ao menos 1 alimento.');
+
+    const header = lines[0];
+    // nutrients start at column index 4
+    nutrientNames = header.slice(4).map(h => String(h||'').trim());
+    dailyNeeds = (lines[1].slice(4)).map(parseNumber);
+
+    const dataRows = lines.slice(2).filter(r => r && r.length>2 && String(r[2]||'').trim() !== '');
+
+    foods = dataRows.map((row, idx) => {
+      const id = String(row[0]||'').trim();
+      const mealCell = String(row[1]||'').trim();
+      const name = String(row[2]||'').trim();
+      const compCell = String(row[3]||'').trim();
+
+      // parse meals: "15,Café da Manhã;15,Lanche"
+      const meals = mealCell === '-' || mealCell === '' ? [] :
+        mealCell.split(';').map(p=>p.trim()).filter(Boolean).map(token=>{
+          const parts = token.split(',');
+          const q = parseNumber(parts[0]);
+          const mealName = parts.slice(1).join(',').trim();
+          return { q, meal: mealName };
+        }).filter(x => x.meal);
+
+      // parse composition: "16.7,7;16.7,8"
+      const comps = compCell === '-' || compCell === '' ? [] :
+        compCell.split(';').map(p=>p.trim()).filter(Boolean).map(token=>{
+          const t = token.replace(/^\(+|\)+$/g,'').trim();
+          const parts = t.includes(',') ? t.split(',') : t.split(':');
+          const q = parseNumber(parts[0]);
+          const idc = parseInt(parts[1]);
+          return { q, id: isNaN(idc) ? null : idc };
+        }).filter(x => x.id !== null);
+
+      const nutRow = row.slice(4).map(parseNumber);
+      return { id, name, meals, comps, rowIndex: idx, nutRow };
+    });
+
+    nutrientsMatrix = foods.map(f => {
+      const arr = new Array(nutrientNames.length).fill(0);
+      for(let k=0;k<nutrientNames.length;k++) arr[k] = f.nutRow[k] || 0;
+      return arr;
+    });
+
+    // build meal list
+    const set = new Set();
+    foods.forEach(f => f.meals.forEach(m => set.add(m.meal)));
+    mealList = Array.from(set).sort((a,b)=> a.localeCompare(b, 'pt-BR'));
+    mealList.forEach((m,i)=> mealIndexByName[m] = i+1);
+
+    loaded = true;
+    statusEl.textContent = `${foods.length} alimentos · ${nutrientNames.length} nutrientes · ${mealList.length} refeições`;
+
+    // initial render: all alimentos alphabetically
+    const list = foods.map(f=>({ name: f.name, id: f.id, idx: f.rowIndex })).sort((a,b)=> a.name.localeCompare(b.name,'pt-BR'));
+    renderThumbs('alimento', list);
+  }catch(err){
+    console.error(err);
+    statusEl.textContent = 'Erro ao carregar TSV — ver console';
+    resultsDiv.innerHTML = `<div class="placeholder">Erro: ${esc(err.message)}</div>`;
+  }
+}
+
+/* ---------------- NUTRIENT PRIORITY ----------------
+   The four priorities to appear first (in this sequence):
+     1) Calorias (kcal)
+     2) Proteínas (g)
+     3) Gorduras Totais (g)
+     4) Carboidratos (g)
+   We'll match by inclusion (normalized) to be robust.
+---------------------------------------------------*/
+const priorityTerms = [
+  ["caloria","calorias","calorias_kcal"],
+  ["proteína","proteinas","proteína (g)","Proteínas_g"],
+  ["gordura total","Gorduras Totais_g","gordura","gorduras"],
+  ["carboidrato","Carboidratos_g"]
+];
+
+function sortedNutrientIndices(){
+  const normNames = nutrientNames.map(n => n.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase());
+  const indices = [...Array(nutrientNames.length).keys()];
+
+  function findPriorityIdx(nm){
+    for(let p=0;p<priorityTerms.length;p++){
+      for(const term of priorityTerms[p]){
+        if(nm.indexOf(term) !== -1) return p;
+      }
+    }
+    return -1;
+  }
+
+  indices.sort((a,b)=>{
+    const pa = findPriorityIdx(normNames[a]);
+    const pb = findPriorityIdx(normNames[b]);
+    if(pa !== -1 && pb !== -1) return pa - pb;
+    if(pa !== -1) return -1;
+    if(pb !== -1) return 1;
+    // otherwise alphabetical
+    return normNames[a].localeCompare(normNames[b], 'pt-BR');
+  });
+
+  return indices;
+}
+
+/* ---------------- RENDER THUMBS ---------------- */
+function renderThumbs(type, list){
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'none';
+  const grid = document.createElement('div');
+  grid.className = 'list';
+
+  list.forEach(item=>{
+    const box = document.createElement('div'); box.className = 'thumbbox';
+    const img = document.createElement('img');
+
+    if(type === 'alimento'){
+      img.src = `Alide${item.id}.png`;
+    } else if(type === 'nutriente'){
+      img.src = `Nlide${item.index+1}.png`;
+    } else {
+      const mealIx = mealIndexByName[item.name] || 0;
+      img.src = `Rlide${mealIx}.png`;
+    }
+    img.onerror = ()=> img.style.display = 'none';
+    box.appendChild(img);
+
+    const nm = document.createElement('div'); nm.className = 'name';
+    nm.textContent = (type === 'refeicao') ? item.name : item.name;
+    box.appendChild(nm);
+
+    if(type === 'alimento'){
+      const f = foods.find(ff => String(ff.id) === String(item.id));
+      if(f && f.comps && f.comps.length){
+        const meta = document.createElement('div'); meta.className = 'meta small'; meta.textContent = 'Composto';
+        box.appendChild(meta);
+      }
+    }
+
+    box.addEventListener('click', ()=>{
+      if(type === 'alimento') openFoodByRowIndex(item.idx);
+      else if(type === 'nutriente') openNutrientByIndex(item.index);
+      else openRefeicaoByName(item.name);
+    });
+
+    grid.appendChild(box);
+  });
+
+  resultsDiv.appendChild(grid);
+}
+
+/* ---------------- SEARCH ---------------- */
+function doSearch(){
+  const mode = modeEl.value;
+  const q = norm(searchEl.value || '');
+  if(!loaded) return;
+  if(mode === 'alimento'){
+    const list = foods.filter(f => norm(f.name).includes(q)).map(f=>({name:f.name,id:f.id,idx:f.rowIndex})).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
+    renderThumbs('alimento', list);
+  } else if(mode === 'nutriente'){
+    const idxs = sortedNutrientIndices();
+    const all = idxs.map(i=>({name: nutrientNames[i], index: i}));
+    const list = q === '' ? all : all.filter(x=> norm(x.name).includes(q));
+    // show alphabetically among same priority handled by sortedNutrientIndices()
+    renderThumbs('nutriente', list);
+  } else {
+    const list = mealList.filter(m => norm(m).includes(q)).map(n=>({name:n})).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
+    renderThumbs('refeicao', list);
+  }
+}
+
+/* ---------------- COMPOSITION EXPANSION ----------------
+   computePer100gByRowIndex: returns array of nutrient values per 100g—
+   expands composition recursively and prevents loops.
+------------------------------------------------------------*/
+function computePer100gByRowIndex(rowIndex, visited = new Set()){
+  const key = `r${rowIndex}`;
+  if(visited.has(key)){
+    console.warn('Loop de composição detectado em', foods[rowIndex].name);
+    return new Array(nutrientNames.length).fill(0);
+  }
+  visited.add(key);
+
+  const f = foods[rowIndex];
+  if(!f || !f.comps || f.comps.length === 0){
+    return nutrientsMatrix[rowIndex] ? nutrientsMatrix[rowIndex].slice() : new Array(nutrientNames.length).fill(0);
+  }
+
+  // accumulate weighted contributions
+  let totalQty = 0;
+  const accum = new Array(nutrientNames.length).fill(0);
+  for(const c of f.comps){
+    const compId = c.id;
+    const compQty = c.q;
+    const compRow = foods.findIndex(ff => String(ff.id) === String(compId));
+    if(compRow === -1){
+      console.warn('Composição aponta para ID inexistente:', compId, 'em', f.name);
+      continue;
+    }
+    totalQty += compQty;
+    const compPer100 = computePer100gByRowIndex(compRow, new Set(visited));
+    for(let k=0;k<nutrientNames.length;k++){
+      accum[k] += compPer100[k] * compQty / 100;
+    }
+  }
+  if(totalQty <= 0) return new Array(nutrientNames.length).fill(0);
+  // convert accum (which is nutrient grams per totalQty g) -> per 100 g
+  const per100 = new Array(nutrientNames.length).fill(0);
+  for(let k=0;k<nutrientNames.length;k++){
+    per100[k] = (accum[k] / totalQty) * 100;
+  }
+  return per100;
+}
+
+/* ---------------- FETCH VISÃO GERAL BY NAME ---------------- */
+async function fetchByNameHTML(name){
+  const candidates = [
+    `${name}.html`,
+    `${encodeURIComponent(name)}.html`
+  ];
+  for(const c of candidates){
+    try{
+      const r = await fetch(c);
+      if(r.ok) return await r.text();
+    }catch(e){}
+  }
+  return null;
+}
+
+/* ---------------- OPEN FOOD (rowIndex) ---------------- */
+async function openFoodByRowIndex(rowIndex){
+  const f = foods[rowIndex];
+  if(!f) return;
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'block';
+  fichaDiv.innerHTML = '';
+
+  const top = document.createElement('div'); top.className='ficha-top';
+  const img = document.createElement('img'); img.className='ficha-thumb'; img.src = `Alide${f.id}.png`; img.onerror = ()=>img.style.display='none';
+  const info = document.createElement('div');
+  info.innerHTML = `<div class="ficha-name">${esc(f.name)}</div><div class="small">ID: ${esc(f.id)}</div><div class="note">Ficha do alimento</div>`;
+  top.appendChild(img); top.appendChild(info); fichaDiv.appendChild(top);
+
+  const tabs = document.createElement('div'); tabs.className = 'subtabs';
+  const tVis = document.createElement('div'); tVis.className='subtab active'; tVis.textContent='Visão Geral';
+  const tComp = document.createElement('div'); tComp.className='subtab'; tComp.textContent='Composição';
+  const tMeals = document.createElement('div'); tMeals.className='subtab'; tMeals.textContent='Refeições';
+  const tNuts = document.createElement('div'); tNuts.className='subtab'; tNuts.textContent='Nutrientes';
+  tabs.appendChild(tVis); tabs.appendChild(tComp); tabs.appendChild(tMeals); tabs.appendChild(tNuts);
+  fichaDiv.appendChild(tabs);
+
+  const area = document.createElement('div'); area.className='area'; fichaDiv.appendChild(area);
+
+  // Visão Geral
+  tVis.onclick = async ()=>{
+    setActiveTab(tVis);
+    const html = await fetchByNameHTML(f.name);
+    area.innerHTML = html || `<div class="placeholder">a completar</div>`;
+  };
+
+  // Composição
+  tComp.onclick = ()=>{
+    setActiveTab(tComp);
+    if(!f.comps || f.comps.length === 0){
+      area.innerHTML = `<div class="placeholder">Sem composição (alimento simples).</div>`;
+      return;
+    }
+    const grid = document.createElement('div'); grid.className = 'grid-cards';
+    f.comps.forEach(c=>{
+      const compRow = foods.findIndex(ff => String(ff.id) === String(c.id));
+      const compName = compRow>=0 ? foods[compRow].name : `ID ${c.id} (não encontrado)`;
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Alide${c.id}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = compName;
+      const p = document.createElement('p'); p.textContent = `${c.q} g`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      if(compRow>=0) card.addEventListener('click', ()=> openFoodByRowIndex(compRow));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  // Refeições (direct + indirect via composition)
+  tMeals.onclick = ()=>{
+    setActiveTab(tMeals);
+
+    // compute grams of component inside parent per 100g parent (recursive)
+    function computeComponentShareInParent(componentId, parentIdx, visited = new Set()){
+      const key = `p${parentIdx}`;
+      if(visited.has(key)) return 0;
+      visited.add(key);
+      const parent = foods[parentIdx];
+      if(!parent || !parent.comps || parent.comps.length === 0) return 0;
+      let totalQty = 0; parent.comps.forEach(c=> totalQty += (c.q||0));
+      if(totalQty <= 0) return 0;
+      let share_g_per100 = 0;
+      for(const c of parent.comps){
+        const compId = String(c.id);
+        const compQty = c.q || 0;
+        const fraction = compQty / totalQty;
+        if(String(compId) === String(componentId)){
+          share_g_per100 += fraction * 100;
+        } else {
+          const compRow = foods.findIndex(ff => String(ff.id) === String(compId));
+          if(compRow !== -1){
+            const childShare = computeComponentShareInParent(componentId, compRow, new Set(visited));
+            share_g_per100 += fraction * (childShare);
+          }
+        }
+      }
+      return share_g_per100;
+    }
+
+    const componentId = String(f.id);
+    const mealMap = new Map();
+
+    // direct contributions (if this food has meals)
+    if(f.meals && f.meals.length){
+      f.meals.forEach(m=>{
+        const prev = mealMap.get(m.meal) || 0;
+        mealMap.set(m.meal, prev + (m.q || 0));
+      });
+    }
+
+    // indirect via parents
+    foods.forEach((parent, parentIdx) => {
+      if(String(parent.id) === componentId) return;
+      const sharePer100 = computeComponentShareInParent(componentId, parentIdx, new Set());
+      if(sharePer100 <= 0) return;
+      if(parent.meals && parent.meals.length){
+        parent.meals.forEach(m=>{
+          const contrib = (sharePer100/100) * (m.q || 0);
+          const prev = mealMap.get(m.meal) || 0;
+          mealMap.set(m.meal, prev + contrib);
+        });
+      }
+    });
+
+    if(mealMap.size === 0){
+      area.innerHTML = `<div class="placeholder">Não há refeições que contenham este alimento (direta ou indiretamente).</div>`;
+      return;
+    }
+
+    const mealArray = Array.from(mealMap.entries()).map(([meal, grams])=>({meal, grams})).sort((a,b)=> b.grams - a.grams);
+    const grid = document.createElement('div'); grid.className = 'grid-cards';
+    mealArray.forEach(it=>{
+      const mealIx = mealIndexByName[it.meal] || 0;
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Rlide${mealIx}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.meal;
+      const p = document.createElement('p'); p.textContent = `${it.grams.toFixed(2)} g (do componente)`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      card.addEventListener('click', ()=> openRefeicaoByName(it.meal));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  // Nutrientes: show non-zero nutrients, sorted by %VD desc
+  tNuts.onclick = ()=>{
+    setActiveTab(tNuts);
+    const per100 = computePer100gByRowIndex(rowIndex, new Set());
+    const list = per100.map((v,k)=>{
+      const need = dailyNeeds[k] || 0;
+      return { k, name: nutrientNames[k], value: v, pct: need>0 ? (100 * v / need) : null };
+    }).filter(x=>x.value>0).sort((a,b)=>{
+      const pa = a.pct===null?0:a.pct; const pb = b.pct===null?0:b.pct; return pb - pa;
+    });
+
+    if(list.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum nutriente disponível.</div>`; return; }
+    const grid = document.createElement('div'); grid.className = 'grid-cards';
+    list.forEach(it=>{
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Nlide${it.k+1}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.name;
+      const p = document.createElement('p'); p.textContent = `${it.value.toFixed(2)}${it.pct!==null? ` (${it.pct.toFixed(1)}% VD)` : ''}`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      card.addEventListener('click', ()=> openNutrientByIndex(it.k));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tVis.click();
+}
+
+/* ---------------- OPEN NUTRIENT ---------------- */
+async function openNutrientByIndex(nIdx){
+  const name = nutrientNames[nIdx];
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'block';
+  fichaDiv.innerHTML = '';
+
+  const top = document.createElement('div'); top.className='ficha-top';
+  const imTop = document.createElement('img'); imTop.className='ficha-thumb'; imTop.src = `Nlide${nIdx+1}.png`; imTop.onerror=()=>imTop.style.display='none';
+  const info = document.createElement('div'); info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha do nutriente</div>`;
+  top.appendChild(imTop); top.appendChild(info); fichaDiv.appendChild(top);
+
+  const tabs = document.createElement('div'); tabs.className='subtabs';
+  const tVis = document.createElement('div'); tVis.className='subtab active'; tVis.textContent='Visão Geral';
+  const tAlim = document.createElement('div'); tAlim.className='subtab'; tAlim.textContent='Alimentos';
+  tabs.appendChild(tVis); tabs.appendChild(tAlim); fichaDiv.appendChild(tabs);
+
+  const area = document.createElement('div'); area.className='area'; fichaDiv.appendChild(area);
+
+  tVis.onclick = async ()=>{
+    setActiveTab(tVis);
+    const html = await fetchByNameHTML(name);
+    area.innerHTML = html || `<div class="placeholder">a completar</div>`;
+  };
+
+  tAlim.onclick = ()=>{
+    setActiveTab(tAlim);
+    const list = foods.map((f, idx)=>{
+      const per100 = computePer100gByRowIndex(idx, new Set());
+      const val = per100[nIdx] || 0;
+      const need = dailyNeeds[nIdx] || 0;
+      return { f, idx, val, pct: need>0 ? (100 * val / need) : null };
+    }).filter(x=>x.val>0).sort((a,b)=>{
+      const pa = a.pct===null?0:a.pct; const pb = b.pct===null?0:b.pct; return pb-pa;
+    });
+
+    if(list.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum alimento contém este nutriente.</div>`; return; }
+    const grid = document.createElement('div'); grid.className='grid-cards';
+    list.forEach(it=>{
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Alide${it.f.id}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.f.name;
+      const p = document.createElement('p'); p.textContent = `${it.val.toFixed(2)}${it.pct!==null? ` (${it.pct.toFixed(1)}% VD)` : ''}`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      card.addEventListener('click', ()=> openFoodByRowIndex(it.idx));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tVis.click();
+}
+
+/* ---------------- OPEN REFEIÇÃO ---------------- */
+async function openRefeicaoByName(name){
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'block';
+  fichaDiv.innerHTML = '';
+
+  const mealIx = mealIndexByName[name] || 0;
+  const top = document.createElement('div'); top.className='ficha-top';
+  const imTop = document.createElement('img'); imTop.className='ficha-thumb'; imTop.src = `Rlide${mealIx}.png`; imTop.onerror=()=>imTop.style.display='none';
+  const info = document.createElement('div'); info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha da refeição</div>`;
+  top.appendChild(imTop); top.appendChild(info); fichaDiv.appendChild(top);
+
+  const tabs = document.createElement('div'); tabs.className='subtabs';
+  const tVis = document.createElement('div'); tVis.className='subtab active'; tVis.textContent='Visão Geral';
+  const tAlim = document.createElement('div'); tAlim.className='subtab'; tAlim.textContent='Alimentos';
+  const tNuts = document.createElement('div'); tNuts.className='subtab'; tNuts.textContent='Nutrientes';
+  tabs.appendChild(tVis); tabs.appendChild(tAlim); tabs.appendChild(tNuts); fichaDiv.appendChild(tabs);
+
+  const area = document.createElement('div'); area.className='area'; fichaDiv.appendChild(area);
+
+  tVis.onclick = async ()=>{
+    setActiveTab(tVis);
+    // try name.html, then URL-encoded
+    const candidates = [
+      `${name}.html`,
+      `${encodeURIComponent(name)}.html`
+    ];
+    let html = null;
+    for(const c of candidates){
+      try{ const r = await fetch(c); if(r.ok){ html = await r.text(); break; } } catch(e){}
+    }
+    area.innerHTML = html || `<div class="placeholder">a completar</div>`;
+  };
+
+  tAlim.onclick = ()=>{
+    setActiveTab(tAlim);
+    // list items that directly belong to meal (plus those included indirectly via composition)
+    // direct:
+    const direct = foods.map((f, idx) => {
+      const m = f.meals.find(mm => norm(mm.meal) === norm(name));
+      return m ? { f, idx, qtd: m.q, source: 'direto' } : null;
+    }).filter(Boolean);
+
+    // indirect: any parent in this meal has comps -> expand parents' comps into components and list components with grams
+    // But user requested the Refeição opens "lista os alimentos usados (com gramas)". We'll show exactly foods directly present in meal.
+    // If you want the components flattened here, we can compute that—currently spec earlier: "lista tudo que aparece na Refeição (direto no TSV) + alimentos simples presentes via Composição (recursivo)"
+    // So compute both direct and components aggregated:
+    const componentMap = new Map(); // id -> {f, grams}
+    // direct elements also count as themselves
+    direct.forEach(it => {
+      const prev = componentMap.get(String(it.f.id)) || { f: it.f, grams: 0 };
+      prev.grams += it.qtd || 0;
+      componentMap.set(String(it.f.id), prev);
+    });
+
+    // for each parent that is in the meal, add its composition contributions
+    direct.forEach(it => {
+      const parent = it.f;
+      if(parent.comps && parent.comps.length){
+        // parent provides comps: compute total quantity listed in parent.comps
+        let totalQty = 0; parent.comps.forEach(c => totalQty += (c.q||0));
+        if(totalQty > 0){
+          parent.comps.forEach(c => {
+            const compId = String(c.id);
+            // parent contributes (c.q / totalQty) fraction of parent's weight
+            const contrib = (c.q / totalQty) * (it.qtd || 0); // grams of component in this meal because parent is present qtd grams
+            const compRow = foods.findIndex(ff => String(ff.id) === compId);
+            const fobj = compRow>=0 ? foods[compRow] : { id: compId, name: `ID ${compId}` };
+            const prev = componentMap.get(compId) || { f: fobj, grams: 0 };
+            prev.grams += contrib;
+            componentMap.set(compId, prev);
+          });
+        }
+      }
+    });
+
+    // now produce array sorted alphabetically by name
+    const items = Array.from(componentMap.values()).sort((a,b)=> a.f.name.localeCompare(b.f.name,'pt-BR'));
+    if(items.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum alimento nesta refeição.</div>`; return; }
+    const grid = document.createElement('div'); grid.className = 'grid-cards';
+    items.forEach(it=>{
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Alide${it.f.id}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.f.name;
+      const p = document.createElement('p'); p.textContent = `${it.grams.toFixed(2)} g`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      const rowIdx = foods.findIndex(ff => String(ff.id) === String(it.f.id));
+      if(rowIdx >= 0) card.addEventListener('click', ()=> openFoodByRowIndex(rowIdx));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tNuts.onclick = ()=>{
+    setActiveTab(tNuts);
+    // sum nutrients across foods in this meal (including component expansion)
+    const items = foods.map((f, idx) => {
+      const m = f.meals.find(mm => norm(mm.meal) === norm(name));
+      return m ? { f, idx, qtd: m.q } : null;
+    }).filter(Boolean);
+
+    if(items.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum alimento nesta refeição.</div>`; return; }
+
+    const totals = new Array(nutrientNames.length).fill(0);
+    items.forEach(it=>{
+      const per100 = computePer100gByRowIndex(it.idx, new Set());
+      for(let k=0;k<nutrientNames.length;k++) totals[k] += per100[k] * (it.qtd/100);
+    });
+
+    // show nutrients sorted by %VD desc
+    const list = totals.map((v,k)=>({ k, value: v, pct: dailyNeeds[k] ? (100*v/dailyNeeds[k]) : null })).filter(x=>x.value>0).sort((a,b)=>{
+      const pa = a.pct===null?0:a.pct; const pb = b.pct===null?0:b.pct; return pb-pa;
+    });
+
+    if(list.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum nutriente calculado.</div>`; return; }
+
+    const grid = document.createElement('div'); grid.className='grid-cards';
+    list.forEach(it=>{
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Nlide${it.k+1}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = nutrientNames[it.k];
+      const p = document.createElement('p'); p.textContent = `${it.value.toFixed(2)}${it.pct!==null? ` (${it.pct.toFixed(1)}% VD)` : ''}`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      card.addEventListener('click', ()=> openNutrientByIndex(it.k));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tVis.click();
+}
+
+/* ---------------- Helpers & events ---------------- */
+function setActiveTab(el){
+  const tabs = el.parentElement.querySelectorAll('.subtab');
+  tabs.forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+}
+
+btnSearch.addEventListener('click', doSearch);
+searchEl.addEventListener('keydown', e=>{ if(e.key === 'Enter') doSearch(); });
+modeEl.addEventListener('change', ()=> {
+  if(!loaded) return;
+  const mode = modeEl.value;
+  if(mode === 'alimento'){
+    const list = foods.map(f=>({name:f.name,id:f.id,idx:f.rowIndex})).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
+    renderThumbs('alimento', list);
+  } else if(mode === 'nutriente'){
+    const idxs = sortedNutrientIndices();
+    const list = idxs.map(i=>({name: nutrientNames[i], index: i}));
+    renderThumbs('nutriente', list);
+  } else {
+    const list = mealList.map(n=>({name:n}));
+    renderThumbs('refeicao', list);
+  }
+});
+
+/* Start */
+loadTSV();
+</script>
+</body>
+</html>
