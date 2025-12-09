@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Painel Nutricional — Limpo</title>
+<style>
+:root{--bg:#f6fff6;--accent:#1c6e36;--muted:#e8f7e9;--card:#fff}
+*{box-sizing:border-box}
+body{font-family: "Segoe UI", Roboto, Arial, sans-serif; margin:0; background:var(--bg); color:#122}
+header{background:var(--accent); color:#fff; padding:14px 18px; font-size:22px; font-weight:700}
+#topbar{display:flex;gap:10px;align-items:center;padding:12px;background:var(--muted);border-bottom:2px solid var(--accent);flex-wrap:wrap}
+.select, .search, button{padding:8px;border-radius:8px;border:1px solid #d1e8d7;background:#fff;font-size:14px}
+.btn{background:var(--accent);color:#fff;border:0;cursor:pointer;font-weight:700;padding:8px 12px;border-radius:8px}
+.small{font-size:0.9rem;color:#444}
+#main{padding:16px;max-width:1200px;margin:0 auto}
+#results{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,0.04)}
+.list{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
+.thumbbox{background:#fff;padding:12px;border-radius:12px;border:1px solid #e2efe2;text-align:center;cursor:pointer;min-height:150px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+.thumbbox img{width:96px;height:96px;object-fit:cover;margin-bottom:8px;border-radius:10px;background:#fff}
+.thumbbox .name{font-weight:700;color:var(--accent);margin-bottom:6px;text-align:center}
+.thumbbox .meta{font-size:0.9rem;color:#666}
+.placeholder{text-align:center;padding:22px;color:#666}
+#ficha{display:none;margin-top:16px;background:#fff;padding:16px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,0.04)}
+.ficha-top{display:flex;gap:16px;align-items:center;border-bottom:1px solid #eee;padding-bottom:12px}
+.ficha-thumb{width:120px;height:120px;object-fit:cover;border-radius:10px}
+.ficha-name{font-size:1.25rem;color:var(--accent);font-weight:700}
+.subtabs{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}
+.subtab{padding:8px 12px;border-radius:8px;background:#f3faf3;border:1px solid #d6edd6;cursor:pointer;font-weight:700;color:#145}
+.subtab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.grid-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.card{background:#fff;border-radius:10px;padding:10px;border:1px solid #e6f1e6;text-align:center;cursor:pointer;min-height:140px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+.card img{width:96px;height:96px;object-fit:cover;border-radius:8px;margin-bottom:8px}
+.card h4{margin:4px 0;color:var(--accent);text-align:center}
+.card p{margin:0;color:#333;text-align:center}
+.note{color:#666;font-style:italic}
+.area{margin-top:12px}
+@media(max-width:700px){.ficha-top{flex-direction:column;align-items:flex-start}}
+/* PDF button style */
+.btn-pdf{background:#0b5; color:#fff; padding:8px 12px; border-radius:8px; border:0; cursor:pointer; font-weight:700}
+</style>
+</head>
+<body>
+<header>Painel Nutricional</header>
+
+<div id="topbar">
+  <label class="small" for="mode">Buscar por:</label>
+  <select id="mode" class="select" aria-label="Modo">
+    <option value="alimento">Alimento</option>
+    <option value="nutriente">Nutriente</option>
+    <option value="refeicao">Refeição</option>
+    <option value="montar">Montar Refeição</option>
+  </select>
+
+  <input id="search" class="search" placeholder="Digite termo (Enter ou Buscar)" style="min-width:280px" />
+
+  <button id="btnSearch" class="btn">Buscar</button>
+
+  <button id="btnND" title="Ver Necessidades Diárias" style="margin-left:8px;padding:8px;border-radius:8px">Ver Necessidades Diárias</button>
+
+  <div id="status" style="margin-left:auto;color:#234;font-size:0.95rem">Carregando...</div>
+</div>
+
+<div id="main">
+  <div id="results"><div class="placeholder">Carregando dados...</div></div>
+  <div id="ficha"></div>
+</div>
+
+<script>
+/* Versão limpa e corrigida do painel — substitua seu arquivo por este.
+   Mantém o arquivo TSV em 'Tabela Principal.tsv' (mesmo diretório).
+*/
+
+// CONFIG
+const FILE = 'Tabela Principal.tsv';
+
+// ESTADO
+let nutrientNames = [];
+let dailyNeeds = [];
+let foods = []; // { id, name, meals:[{q,meal}], comps:[{q,id}], rowIndex, nutRow }
+let nutrientsMatrix = [];
+let mealList = [];
+let mealIndexByName = {};
+let loaded = false;
+
+// DOM
+const resultsDiv = document.getElementById('results');
+const fichaDiv = document.getElementById('ficha');
+const statusEl = document.getElementById('status');
+const modeEl = document.getElementById('mode');
+const searchEl = document.getElementById('search');
+const btnSearch = document.getElementById('btnSearch');
+const btnND = document.getElementById('btnND');
+
+function esc(s){ return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function norm(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+
+function normalizeNumberRaw(v){
+  if(v === undefined || v === null) return 0;
+  let s = String(v).trim();
+  if(s === '-' || s === '' || /^-+$/.test(s)) return 0;
+  s = s.replace(/\u00A0/g,'').replace(/\s+/g,'');
+  s = s.replace(/[^\d,.\-+eE]/g,'');
+  if(s.indexOf(',') !== -1 && s.indexOf('.') !== -1){
+    s = s.replace(/\./g,'');
+    s = s.replace(',', '.');
+  } else {
+    if(s.indexOf(',') !== -1) s = s.replace(',', '.');
+  }
+  const n = Number(s);
+  return isNaN(n) ? 0 : n;
+}
+
+/* ---------------- parseTSV ---------------- */
+function parseTSVText(txt){
+  const lines = txt.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').map(l=>l.split('\t'));
+  if(lines.length < 3) throw new Error('TSV precisa ter header (linha 0), necessidades (linha 1) e ao menos 1 alimento (linha 2+)');
+
+  const header = lines[0];
+  nutrientNames = header.slice(4).map(h => String(h||'').trim());
+  dailyNeeds = (lines[1].slice(4)).map(v => normalizeNumberRaw(v));
+
+  const dataRows = lines.slice(2).filter(r => r && r.length>2 && String(r[2]||'').trim() !== '');
+
+  foods = dataRows.map((row, idx) => {
+    const id = String(row[0]||'').trim();
+    const mealCell = String(row[1]||'').trim();
+    const name = String(row[2]||'').trim();
+    const compCell = String(row[3]||'').trim();
+
+    const meals = mealCell === '-' || mealCell === '' ? [] :
+      mealCell.split(';').map(p=>p.trim()).filter(Boolean).map(token=>{
+        const parts = token.split(',');
+        const q = normalizeNumberRaw(parts[0]);
+        const mealName = parts.slice(1).join(',').trim();
+        return { q, meal: mealName };
+      }).filter(x => x.meal);
+
+    const comps = compCell === '-' || compCell === '' ? [] :
+      compCell.split(';').map(p=>p.trim()).filter(Boolean).map(token=>{
+        const t = token.replace(/^\(+|\)+$/g,'').trim();
+        const parts = t.includes(',') ? t.split(',') : t.split(':');
+        const q = normalizeNumberRaw(parts[0]);
+        const idc = parseInt(parts[1]);
+        return { q, id: isNaN(idc) ? null : idc };
+      }).filter(x => x.id !== null);
+
+    const nutRow = row.slice(4).map(v => normalizeNumberRaw(v));
+    return { id, name, meals, comps, rowIndex: idx, nutRow };
+  });
+
+  nutrientsMatrix = foods.map(f => f.nutRow ? f.nutRow.slice() : new Array(nutrientNames.length).fill(0));
+
+  const set = new Set();
+  foods.forEach(f => f.meals.forEach(m => set.add(m.meal)));
+  mealList = Array.from(set).sort((a,b)=> a.localeCompare(b, 'pt-BR'));
+  mealIndexByName = {};
+  mealList.forEach((m,i)=> mealIndexByName[m] = i+1);
+
+  loaded = true;
+  statusEl.textContent = `${foods.length} alimentos · ${nutrientNames.length} nutrientes · ${mealList.length} refeições`;
+
+  const list = foods.map(f=>({ name: f.name, id: f.id, idx: f.rowIndex })).sort((a,b)=> a.name.localeCompare(b.name,'pt-BR'));
+  renderThumbs('alimento', list);
+}
+
+/* ---------------- load TSV ---------------- */
+async function loadTSV(){
+  try{
+    statusEl.textContent = 'Carregando Tabela Principal.tsv ...';
+    const r = await fetch(FILE);
+    if(!r.ok) throw new Error('Arquivo não encontrado: ' + FILE);
+    const txt = await r.text();
+    parseTSVText(txt);
+  }catch(err){
+    console.error(err);
+    statusEl.textContent = 'Erro ao carregar TSV — ver console';
+    resultsDiv.innerHTML = `<div class="placeholder">Erro: ${esc(err.message)}</div>`;
+  }
+}
+
+/* ---------------- priority / order ---------------- */
+const priorityTerms = [
+  ["caloria","calorias","calorias (kcal)"],
+  ["proteína","proteinas","proteína (g)","proteínas (g)"],
+  ["gordura total","gorduras totais","gordura","gorduras"],
+  ["carboidrato","carboidratos"]
+];
+
+function sortedNutrientIndices(){
+  const normNames = nutrientNames.map(n => n.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase());
+  const idxs = [...Array(nutrientNames.length).keys()];
+  function findPriorityIdx(nm){
+    for(let p=0;p<priorityTerms.length;p++){
+      for(const term of priorityTerms[p]){
+        if(nm.indexOf(term) !== -1) return p;
+      }
+    }
+    return -1;
+  }
+  idxs.sort((a,b)=>{
+    const pa = findPriorityIdx(normNames[a]);
+    const pb = findPriorityIdx(normNames[b]);
+    if(pa !== -1 && pb !== -1) return pa - pb;
+    if(pa !== -1) return -1;
+    if(pb !== -1) return 1;
+    return normNames[a].localeCompare(normNames[b], 'pt-BR');
+  });
+  return idxs;
+}
+
+/* ---------------- render thumbs ---------------- */
+function renderThumbs(type, list){
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'none';
+  const grid = document.createElement('div'); grid.className = 'list';
+  list.forEach(item=>{
+    const box = document.createElement('div'); box.className = 'thumbbox';
+    const img = document.createElement('img');
+    if(type === 'alimento') img.src = `Alide${item.id}.png`;
+    else if(type === 'nutriente') img.src = `Nlide${item.index+1}.png`;
+    else { const mealIx = mealIndexByName[item.name] || 0; img.src = `Rlide${mealIx}.png`; }
+    img.onerror = ()=> img.style.display = 'none';
+    box.appendChild(img);
+    const nm = document.createElement('div'); nm.className = 'name'; nm.textContent = item.name;
+    box.appendChild(nm);
+    if(type === 'alimento'){
+      const f = foods.find(ff => String(ff.id) === String(item.id));
+      if(f && f.comps && f.comps.length){
+        const meta = document.createElement('div'); meta.className = 'meta small'; meta.textContent = 'Composto';
+        box.appendChild(meta);
+      }
+    }
+    box.addEventListener('click', ()=>{
+      if(type === 'alimento') openFoodByRowIndex(item.idx);
+      else if(type === 'nutriente') openNutrientByIndex(item.index);
+      else openRefeicaoByName(item.name);
+    });
+    grid.appendChild(box);
+  });
+  resultsDiv.appendChild(grid);
+}
+
+/* ---------------- search ---------------- */
+function doSearch(){
+  const mode = modeEl.value;
+  const q = norm(searchEl.value || '');
+  if(!loaded) return;
+  if(mode === 'alimento'){
+    const list = foods.filter(f => norm(f.name).includes(q)).map(f=>({name:f.name,id:f.id,idx:f.rowIndex})).sort((a,b)=> a.name.localeCompare(b.name,'pt-BR'));
+    renderThumbs('alimento', list);
+  } else if(mode === 'nutriente'){
+    const idxs = sortedNutrientIndices();
+    const all = idxs.map(i=>({name: nutrientNames[i], index: i}));
+    const list = q === '' ? all : all.filter(x=> norm(x.name).includes(q));
+    renderThumbs('nutriente', list);
+  } else if(mode === 'refeicao'){
+    const list = mealList.filter(m => norm(m).includes(q)).map(n=>({name:n})).sort((a,b)=>a.name.localeCompare(b,'pt-BR'));
+    renderThumbs('refeicao', list);
+  } else if(mode === 'montar'){
+    renderRefeicaoBuilder();
+  }
+}
+
+/* ---------------- composition recursion ---------------- */
+function computePer100gByRowIndex(rowIndex, visited = new Set()){
+  const key = `r${rowIndex}`;
+  if(visited.has(key)){
+    console.warn('Loop de composição detectado em', foods[rowIndex] ? foods[rowIndex].name : rowIndex);
+    return new Array(nutrientNames.length).fill(0);
+  }
+  visited.add(key);
+  const f = foods[rowIndex];
+  if(!f || !f.comps || f.comps.length === 0){
+    return nutrientsMatrix[rowIndex] ? nutrientsMatrix[rowIndex].slice() : new Array(nutrientNames.length).fill(0);
+  }
+  let totalQty = 0;
+  const accum = new Array(nutrientNames.length).fill(0);
+  for(const c of f.comps){
+    const compId = c.id;
+    const compQty = c.q;
+    const compRow = foods.findIndex(ff => String(ff.id) === String(compId));
+    if(compRow === -1){
+      console.warn('Composição aponta para ID inexistente:', compId, 'em', f.name);
+      continue;
+    }
+    totalQty += compQty;
+    const compPer100 = computePer100gByRowIndex(compRow, new Set(visited));
+    for(let k=0;k<nutrientNames.length;k++){
+      accum[k] += compPer100[k] * compQty / 100;
+    }
+  }
+  if(totalQty <= 0) return new Array(nutrientNames.length).fill(0);
+  const per100 = new Array(nutrientNames.length).fill(0);
+  for(let k=0;k<nutrientNames.length;k++) per100[k] = (accum[k] / totalQty) * 100;
+  return per100;
+}
+
+/* ---------------- fetch visão geral ---------------- */
+async function fetchByNameHTML(name){
+  const candidates = [`${name}.html`, `${encodeURIComponent(name)}.html`];
+  for(const c of candidates){
+    try{
+      const r = await fetch(c);
+      if(r.ok) return await r.text();
+    }catch(e){}
+  }
+  return null;
+}
+
+/* ---------------- open ND ---------------- */
+async function openND(){
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'block';
+  fichaDiv.innerHTML = '';
+  const top = document.createElement('div'); top.className='ficha-top';
+  const img = document.createElement('img'); img.className='ficha-thumb'; img.src = `Alide0.png`; img.onerror = ()=>img.style.display='none';
+  const info = document.createElement('div');
+  info.innerHTML = `<div class="ficha-name">Necessidades Diárias</div><div class="note">Linha de referência (ID 0)</div>`;
+  top.appendChild(img); top.appendChild(info); fichaDiv.appendChild(top);
+
+  const tabs = document.createElement('div'); tabs.className = 'subtabs';
+  const tVis = document.createElement('div'); tVis.className='subtab active'; tVis.textContent='Visão Geral';
+  const tNuts = document.createElement('div'); tNuts.className='subtab'; tNuts.textContent='Nutrientes';
+  tabs.appendChild(tVis); tabs.appendChild(tNuts); fichaDiv.appendChild(tabs);
+
+  const area = document.createElement('div'); area.className = 'area'; fichaDiv.appendChild(area);
+
+  tVis.onclick = async ()=>{
+    setActiveTab(tVis);
+    const html = await fetchByNameHTML('a0') || await fetchByNameHTML('Necessidades Diárias') || null;
+    area.innerHTML = html || `<div class="placeholder">Visão Geral não encontrada.</div>`;
+  };
+
+  tNuts.onclick = ()=>{
+    setActiveTab(tNuts);
+    if(!dailyNeeds || dailyNeeds.length === 0){
+      area.innerHTML = `<div class="placeholder">Necessidades diárias não carregadas.</div>`;
+      return;
+    }
+    const idxs = sortedNutrientIndices();
+    const list = idxs.map(i => ({ i, name: nutrientNames[i], val: dailyNeeds[i] }));
+    const grid = document.createElement('div'); grid.className='grid-cards';
+    list.forEach(it=>{
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Nlide${it.i+1}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.name;
+      const p = document.createElement('p'); p.textContent = `${it.val}`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tVis.click();
+}
+
+/* ---------------- open food ---------------- */
+/* ---------------- open food ---------------- */
+async function openFoodByRowIndex(rowIndex){
+  const f = foods[rowIndex];
+  if(!f) return;
+
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'block';
+  fichaDiv.innerHTML = '';
+
+  /* ---------------- BOTÃO PDF NO TOPO ---------------- */
+  const btnTopPDF = document.createElement('button');
+  btnTopPDF.className = 'btn-pdf';
+  btnTopPDF.style.float = "right";
+  btnTopPDF.style.margin = "5px 0";
+  btnTopPDF.textContent = "Baixar PDF deste Alimento";
+  btnTopPDF.onclick = () => gerarPDFAlimento(rowIndex);
+  fichaDiv.appendChild(btnTopPDF);
+  /* --------------------------------------------------- */
+
+
+  /* ---------------- CABEÇALHO ---------------- */
+  const top = document.createElement('div');
+  top.className = 'ficha-top';
+
+  const img = document.createElement('img');
+  img.className='ficha-thumb';
+  img.src = `Alide${f.id}.png`;
+  img.onerror = ()=> img.style.display='none';
+
+  const info = document.createElement('div');
+  info.innerHTML =
+    `<div class="ficha-name">${esc(f.name)}</div>
+     <div class="small">ID: ${esc(f.id)}</div>
+     <div class="note">Ficha do alimento</div>`;
+
+  top.appendChild(img);
+  top.appendChild(info);
+  fichaDiv.appendChild(top);
+
+
+  /* ---------------- ABAS ---------------- */
+  const tabs = document.createElement('div');
+  tabs.className = 'subtabs';
+
+  const tVis   = document.createElement('div'); tVis.className='subtab active'; tVis.textContent='Visão Geral';
+  const tComp  = document.createElement('div'); tComp.className='subtab'; tComp.textContent='Composição';
+  const tMeals = document.createElement('div'); tMeals.className='subtab'; tMeals.textContent='Refeições';
+  const tNuts  = document.createElement('div'); tNuts.className='subtab'; tNuts.textContent='Nutrientes';
+
+  tabs.appendChild(tVis);
+  tabs.appendChild(tComp);
+  tabs.appendChild(tMeals);
+  tabs.appendChild(tNuts);
+  fichaDiv.appendChild(tabs);
+
+  const area = document.createElement('div');
+  area.className = 'area';
+  fichaDiv.appendChild(area);
+
+
+  /* ---------------- AÇÃO: VISÃO GERAL ---------------- */
+  tVis.onclick = async () => {
+    setActiveTab(tVis);
+    const html = await fetchByNameHTML(f.name) || await fetchByNameHTML(`a${f.id}`);
+    area.innerHTML = html || `<div class="placeholder">a completar</div>`;
+  };
+
+
+  /* ---------------- AÇÃO: COMPOSIÇÃO ---------------- */
+  tComp.onclick = () => {
+    setActiveTab(tComp);
+
+    if(!f.comps || f.comps.length === 0){
+      area.innerHTML = `<div class="placeholder">Sem composição (alimento simples).</div>`;
+      return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'grid-cards';
+
+    f.comps.forEach(c=>{
+      const compRow = foods.findIndex(ff => String(ff.id) === String(c.id));
+      const compName = compRow >= 0 ? foods[compRow].name : `ID ${c.id} (não encontrado)`;
+
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const im = document.createElement('img');
+      im.src = `Alide${c.id}.png`;
+      im.onerror =()=> im.style.display='none';
+
+      const h = document.createElement('h4');
+      h.textContent = compName;
+
+      const p = document.createElement('p');
+      p.textContent = `${c.q} g`;
+
+      card.appendChild(im);
+      card.appendChild(h);
+      card.appendChild(p);
+
+      if(compRow>=0) card.addEventListener('click', ()=> openFoodByRowIndex(compRow));
+
+      grid.appendChild(card);
+    });
+
+    area.innerHTML = '';
+    area.appendChild(grid);
+  };
+
+
+  /* ---------------- AÇÃO: REFEIÇÕES ---------------- */
+  tMeals.onclick = () => {
+    setActiveTab(tMeals);
+
+    const meals = computeMealsForFood(rowIndex);  // Função já existente
+    if(!meals || meals.length === 0){
+      area.innerHTML = `<div class="placeholder">Não há refeições contendo este alimento.</div>`;
+      return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'grid-cards';
+
+    meals.forEach(it => {
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const mealIx = mealIndexByName[it.meal] || 0;
+
+      const im = document.createElement('img');
+      im.src = `Rlide${mealIx}.png`;
+      im.onerror = ()=> im.style.display='none';
+
+      const h = document.createElement('h4');
+      h.textContent = it.meal;
+
+      const p = document.createElement('p');
+      p.textContent = `${it.grams.toFixed(2)} g`;
+
+      card.appendChild(im);
+      card.appendChild(h);
+      card.appendChild(p);
+
+      card.addEventListener('click', ()=> openRefeicaoByName(it.meal));
+
+      grid.appendChild(card);
+    });
+
+    area.innerHTML = '';
+    area.appendChild(grid);
+  };
+
+
+  /* ---------------- AÇÃO: NUTRIENTES ---------------- */
+  tNuts.onclick = () => {
+    setActiveTab(tNuts);
+
+    const per100 = computePer100gByRowIndex(rowIndex, new Set());
+    const list = per100.map((v,k)=>{
+      const need = dailyNeeds[k] || 0;
+      return {
+        k,
+        name: nutrientNames[k],
+        value: v,
+        pct: need>0 ? (100 * v / need) : null
+      };
+    }).filter(x=>x.value>0)
+      .sort((a,b)=> (b.pct||0) - (a.pct||0));
+
+    if(list.length === 0){
+      area.innerHTML = `<div class="placeholder">Nenhum nutriente disponível.</div>`;
+      return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'nut-grid';
+
+    list.forEach(it=>{
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const im = document.createElement('img');
+      im.src = `Nlide${it.k+1}.png`;
+      im.onerror = ()=> im.style.display='none';
+
+      const h = document.createElement('h4');
+      h.textContent = it.name;
+
+      const p = document.createElement('p');
+      p.textContent =
+        `${it.value.toFixed(2)}${it.pct!==null ? ` (${it.pct.toFixed(1)}% VD)` : ''}`;
+
+      card.appendChild(im);
+      card.appendChild(h);
+      card.appendChild(p);
+
+      card.addEventListener('click', ()=> openNutrientByIndex(it.k));
+
+      grid.appendChild(card);
+    });
+
+    area.innerHTML = '';
+    area.appendChild(grid);
+  };
+
+
+  /* abrir na aba inicial */
+  tVis.click();
+}
+
+/* ---------------- open nutrient ---------------- */
+async function openNutrientByIndex(nIdx){
+  const name = nutrientNames[nIdx];
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'block';
+  fichaDiv.innerHTML = '';
+
+  const top = document.createElement('div'); top.className='ficha-top';
+  const imTop = document.createElement('img'); imTop.className='ficha-thumb'; imTop.src = `Nlide${nIdx+1}.png`; imTop.onerror=()=>imTop.style.display='none';
+  const info = document.createElement('div'); info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha do nutriente</div>`;
+  top.appendChild(imTop); top.appendChild(info); fichaDiv.appendChild(top);
+
+  const tabs = document.createElement('div'); tabs.className='subtabs';
+  const tVis = document.createElement('div'); tVis.className='subtab active'; tVis.textContent='Visão Geral';
+  const tAlim = document.createElement('div'); tAlim.className='subtab'; tAlim.textContent='Alimentos';
+  const tRef = document.createElement('div'); tRef.className='subtab'; tRef.textContent='Refeições';
+  tabs.appendChild(tVis); tabs.appendChild(tAlim); tabs.appendChild(tRef); fichaDiv.appendChild(tabs);
+
+  const area = document.createElement('div'); area.className='area'; fichaDiv.appendChild(area);
+
+  tVis.onclick = async ()=>{
+    setActiveTab(tVis);
+    const html = await fetchByNameHTML(name);
+    area.innerHTML = html || `<div class="placeholder">a completar</div>`;
+  };
+
+  tAlim.onclick = ()=>{
+    setActiveTab(tAlim);
+    const list = foods.map((f, idx)=>{
+      const per100 = computePer100gByRowIndex(idx, new Set());
+      const val = per100[nIdx] || 0;
+      const need = dailyNeeds[nIdx] || 0;
+      return { f, idx, val, pct: need>0 ? (100 * val / need) : null };
+    }).filter(x=>x.val>0).sort((a,b)=>{
+      const pa = a.pct===null?0:a.pct; const pb = b.pct===null?0:b.pct; return pb-pa;
+    });
+
+    if(list.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum alimento contém este nutriente.</div>`; return; }
+    const grid = document.createElement('div'); grid.className='grid-cards';
+    list.forEach(it=>{
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Alide${it.f.id}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.f.name;
+      const p = document.createElement('p'); p.textContent = `${it.val.toFixed(2)}${it.pct!==null? ` (${it.pct.toFixed(1)}% VD)` : ''}`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      card.addEventListener('click', ()=> openFoodByRowIndex(it.idx));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tRef.onclick = () => {
+    setActiveTab(tRef);
+
+    const refeicoes = mealList;
+    if(!refeicoes || refeicoes.length === 0){
+      area.innerHTML = `<div class="placeholder">Nenhuma refeição cadastrada.</div>`;
+      return;
+    }
+
+    const results = [];
+    refeicoes.forEach(mealName => {
+      const itens = foods
+        .map((f, idx) => {
+          const m = f.meals.find(mm => norm(mm.meal) === norm(mealName));
+          return m ? { f, idx, qtd: m.q } : null;
+        })
+        .filter(Boolean);
+
+      if(itens.length === 0) return;
+
+      let total = 0;
+      itens.forEach(it => {
+        const per100 = computePer100gByRowIndex(it.idx, new Set());
+        const val = per100[nIdx] || 0;
+        total += val * (it.qtd / 100);
+      });
+
+      const need = dailyNeeds[nIdx] || 0;
+      const pct = need > 0 ? (100 * total / need) : null;
+
+      results.push({ meal: mealName, total, pct });
+    });
+
+    if(results.length === 0){ area.innerHTML = `<div class="placeholder">Nenhuma refeição contém este nutriente.</div>`; return; }
+
+    results.sort((a,b)=> (b.pct || 0) - (a.pct || 0));
+    const grid = document.createElement('div'); grid.className='grid-cards';
+    results.forEach(it=>{
+      const mealIx = mealIndexByName[it.meal] || 0;
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Rlide${mealIx}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.meal;
+      const p = document.createElement('p'); p.textContent = `${it.total.toFixed(2)}${it.pct!==null? ` (${it.pct.toFixed(1)}% VD)` : ''}`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      card.addEventListener('click', ()=> openRefeicaoByName(it.meal));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tVis.click();
+}
+
+/* ---------------- open refeição ---------------- */
+async function openRefeicaoByName(name){
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'block';
+  fichaDiv.innerHTML = '';
+
+  const mealIx = mealIndexByName[name] || 0;
+  const top = document.createElement('div'); top.className='ficha-top';
+  const imTop = document.createElement('img'); imTop.className='ficha-thumb'; imTop.src = `Rlide${mealIx}.png`; imTop.onerror=()=>imTop.style.display='none';
+  const info = document.createElement('div'); info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha da refeição</div>`;
+  top.appendChild(imTop); top.appendChild(info); fichaDiv.appendChild(top);
+
+  const tabs = document.createElement('div'); tabs.className='subtabs';
+  const tVis = document.createElement('div'); tVis.className='subtab active'; tVis.textContent='Visão Geral';
+  const tAlim = document.createElement('div'); tAlim.className='subtab'; tAlim.textContent='Alimentos';
+  const tNuts = document.createElement('div'); tNuts.className='subtab'; tNuts.textContent='Nutrientes';
+  tabs.appendChild(tVis); tabs.appendChild(tAlim); tabs.appendChild(tNuts); fichaDiv.appendChild(tabs);
+
+  const area = document.createElement('div'); area.className='area'; fichaDiv.appendChild(area);
+
+  tVis.onclick = async ()=>{ setActiveTab(tVis); const html = await fetchByNameHTML(name); area.innerHTML = html || `<div class="placeholder">a completar</div>`; };
+
+  tAlim.onclick = ()=> {
+    setActiveTab(tAlim);
+    const direct = foods.map((f, idx) => {
+      const m = f.meals.find(mm => norm(mm.meal) === norm(name));
+      return m ? { f, idx, qtd: m.q } : null;
+    }).filter(Boolean);
+
+    const componentMap = new Map();
+    direct.forEach(it => {
+      const prev = componentMap.get(String(it.f.id)) || { f: it.f, grams: 0 };
+      prev.grams += it.qtd || 0;
+      componentMap.set(String(it.f.id), prev);
+    });
+
+    direct.forEach(it => {
+      const parent = it.f;
+      if(parent.comps && parent.comps.length){
+        let totalQty = 0; parent.comps.forEach(c => totalQty += (c.q||0));
+        if(totalQty > 0){
+          parent.comps.forEach(c => {
+            const compId = String(c.id);
+            const contrib = (c.q / totalQty) * (it.qtd || 0);
+            const compRow = foods.findIndex(ff => String(ff.id) === compId);
+            const fobj = compRow>=0 ? foods[compRow] : { id: compId, name: `ID ${compId}` };
+            const prev = componentMap.get(compId) || { f: fobj, grams: 0 };
+            prev.grams += contrib;
+            componentMap.set(compId, prev);
+          });
+        }
+      }
+    });
+
+    const items = Array.from(componentMap.values()).sort((a,b)=> a.f.name.localeCompare(b.f.name,'pt-BR'));
+    if(items.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum alimento nesta refeição.</div>`; return; }
+    const grid = document.createElement('div'); grid.className = 'grid-cards';
+    items.forEach(it=> {
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Alide${it.f.id}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.f.name;
+      const p = document.createElement('p'); p.textContent = `${it.grams.toFixed(2)} g`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      const rowIdx = foods.findIndex(ff => String(ff.id) === String(it.f.id));
+      if(rowIdx >= 0) card.addEventListener('click', ()=> openFoodByRowIndex(rowIdx));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tNuts.onclick = ()=> {
+    setActiveTab(tNuts);
+    const items = foods.map((f, idx) => {
+      const m = f.meals.find(mm => norm(mm.meal) === norm(name));
+      return m ? { f, idx, qtd: m.q } : null;
+    }).filter(Boolean);
+
+    if(items.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum alimento nesta refeição.</div>`; return; }
+    const totals = new Array(nutrientNames.length).fill(0);
+    items.forEach(it=>{
+      const per100 = computePer100gByRowIndex(it.idx, new Set());
+      for(let k=0;k<nutrientNames.length;k++) totals[k] += per100[k] * (it.qtd/100);
+    });
+
+    const list = totals.map((v,k)=>({ k, value: v, pct: dailyNeeds[k] ? (100*v/dailyNeeds[k]) : null })).filter(x=>x.value>0).sort((a,b)=>{
+      const pa = a.pct===null?0:a.pct; const pb = b.pct===null?0:b.pct; return pb-pa;
+    });
+
+    if(list.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum nutriente calculado.</div>`; return; }
+    const grid = document.createElement('div'); grid.className='grid-cards';
+    list.forEach(it=>{
+      const card = document.createElement('div'); card.className='card';
+      const im = document.createElement('img'); im.src = `Nlide${it.k+1}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = nutrientNames[it.k];
+      const p = document.createElement('p'); p.textContent = `${it.value.toFixed(2)}${it.pct!==null? ` (${it.pct.toFixed(1)}% VD)` : ''}`;
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      card.addEventListener('click', ()=> openNutrientByIndex(it.k));
+      grid.appendChild(card);
+    });
+    area.innerHTML = ''; area.appendChild(grid);
+  };
+
+  tVis.click();
+}
+
+/* ---------------- MONTAR REFEIÇÃO ---------------- */
+function renderRefeicaoBuilder() {
+  resultsDiv.innerHTML = '';
+  fichaDiv.style.display = 'block';
+  fichaDiv.innerHTML = '';
+
+  const top = document.createElement('div'); top.className='ficha-top';
+  top.innerHTML = `<div class="ficha-name">Montar nova refeição</div><div class="note">Escolha alimentos e quantidades</div>`;
+  fichaDiv.appendChild(top);
+
+  const area = document.createElement('div'); area.className='area'; fichaDiv.appendChild(area);
+
+  let itens = [];  // { id, idx, qtd }
+
+  function atualizarTabela() {
+    if (itens.length === 0) {
+      area.innerHTML = `<div class="placeholder">Nenhum alimento adicionado.</div>`;
+      return;
+    }
+
+    const tbl = document.createElement('div');
+    tbl.innerHTML = `<h3>Alimentos da refeição</h3>`;
+
+    itens.forEach((it, pos) => {
+      const f = foods[it.idx];
+
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.alignItems = 'center';
+      row.style.gap = '10px';
+      row.style.margin = '8px 0';
+
+      const img = document.createElement('img');
+      img.src = `Alide${f.id}.png`;
+      img.onerror = () => img.style.display = 'none';
+      img.style.width = '48px';
+      img.style.height = '48px';
+
+      const name = document.createElement('div');
+      name.textContent = f.name;
+      name.style.fontWeight = '600';
+
+      const inp = document.createElement('input');
+      inp.type = 'number';
+      inp.value = it.qtd;
+      inp.style.width = '80px';
+      inp.onchange = () => { it.qtd = Number(inp.value) || 0; };
+
+      const btnDel = document.createElement('button');
+      btnDel.textContent = 'X';
+      btnDel.className = 'btn';
+      btnDel.style.background = '#a33';
+      btnDel.onclick = () => { itens.splice(pos, 1); atualizarTabela(); };
+
+      row.appendChild(img); row.appendChild(name); row.appendChild(inp); row.appendChild(btnDel);
+      tbl.appendChild(row);
+    });
+
+    const actions = document.createElement('div');
+    actions.style.marginTop = '12px';
+
+    const btnSalvarComposto = document.createElement('button');
+    btnSalvarComposto.className = 'btn';
+    btnSalvarComposto.textContent = 'Salvar como Alimento Composto';
+    btnSalvarComposto.onclick = () => salvarComoComposto(itens);
+
+    const btnSalvarRefeicao = document.createElement('button');
+    btnSalvarRefeicao.className = 'btn';
+    btnSalvarRefeicao.style.marginLeft = '8px';
+    btnSalvarRefeicao.textContent = 'Salvar como Refeição';
+    btnSalvarRefeicao.onclick = () => salvarComoRefeicao(itens);
+
+    const btnPDF = document.createElement('button');
+    btnPDF.className = 'btn-pdf';
+    btnPDF.style.marginLeft = '8px';
+    btnPDF.textContent = 'Baixar PDF da Refeição';
+    btnPDF.onclick = () => gerarPDFRefeicao(itens);
+
+    actions.appendChild(btnSalvarComposto); actions.appendChild(btnSalvarRefeicao); actions.appendChild(btnPDF);
+
+    area.innerHTML = '';
+    area.appendChild(tbl);
+    area.appendChild(actions);
+  }
+
+  const seletor = document.createElement('div');
+  seletor.style.margin = '20px 0';
+  seletor.innerHTML = `
+    <h3>Adicionar alimento</h3>
+    <input id="addFoodSearch" class="search" placeholder="Buscar alimento..." style="min-width:260px" />
+    <button id="addFoodBtn" class="btn">Buscar</button>
+  `;
+  fichaDiv.appendChild(seletor);
+
+  const listaSel = document.createElement('div'); fichaDiv.appendChild(listaSel);
+
+  function buscarAdicionar() {
+    const q = norm(document.getElementById('addFoodSearch').value || '');
+    const lista = foods
+      .filter(f => norm(f.name).includes(q))
+      .map(f => ({ name: f.name, id: f.id, idx: f.rowIndex }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+
+    listaSel.innerHTML = '';
+    const grid = document.createElement('div'); grid.className = 'grid-cards';
+    lista.forEach(it => {
+      const card = document.createElement('div'); card.className = 'card';
+      const im = document.createElement('img'); im.src = `Alide${it.id}.png`; im.onerror=()=>im.style.display='none';
+      const h = document.createElement('h4'); h.textContent = it.name;
+      const p = document.createElement('p'); p.textContent = 'Clique para adicionar';
+      card.appendChild(im); card.appendChild(h); card.appendChild(p);
+      card.onclick = () => { itens.push({ id: it.id, idx: it.idx, qtd: 100 }); atualizarTabela(); listaSel.innerHTML = ''; document.getElementById('addFoodSearch').value = ''; };
+      grid.appendChild(card);
+    });
+    listaSel.appendChild(grid);
+  }
+
+  document.getElementById('addFoodBtn').onclick = buscarAdicionar;
+  document.getElementById('addFoodSearch').addEventListener('keydown', e => { if (e.key === 'Enter') buscarAdicionar(); });
+
+  atualizarTabela();
+}
+
+/* ---------------- Helpers para salvar e gerar TSV ---------------- */
+function getNextId(){
+  let max = 0;
+  foods.forEach(f=>{
+    const n = parseInt(String(f.id).replace(/\D/g,''),10);
+    if(!isNaN(n) && n > max) max = n;
+  });
+  return String(max + 1);
+}
+
+function buildTSVString(){
+  const headerCols = ['ID','Refeicoes','Nome','Composição', ...nutrientNames];
+  const headerLine = headerCols.join('\t');
+  const dailyLine = ['', '', '', '', ...dailyNeeds.map(v => String(v))].join('\t');
+  const rows = foods.map(f=>{
+    const meals = (f.meals && f.meals.length) ? f.meals.map(m => `${m.q},${m.meal}`).join(';') : '-';
+    const comps = (f.comps && f.comps.length) ? f.comps.map(c => `${c.q},${c.id}`).join(';') : '-';
+    const nut = (f.nutRow && f.nutRow.length) ? f.nutRow.map(v => String(v)) : new Array(nutrientNames.length).fill('0');
+    return [String(f.id), meals, f.name, comps, ...nut].join('\t');
+  });
+  return [headerLine, dailyLine, ...rows].join('\n');
+}
+
+function downloadTSVAndReload(tsvText, filename='Tabela-Gerada.tsv'){
+  const blob = new Blob([tsvText], {type: 'text/tab-separated-values'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  parseTSVText(tsvText);
+}
+
+/* salvar como composto */
+function salvarComoComposto(itens){
+  if(!itens || itens.length === 0){ alert('Adicione pelo menos um alimento antes de salvar.'); return; }
+  const nome = prompt('Nome do novo alimento composto:','Nova Refeição');
+  if(!nome) return;
+  const map = new Map();
+  itens.forEach(it=>{ const key = String(it.id); const prev = map.get(key) || 0; map.set(key, prev + (it.qtd || 0)); });
+  const compsArr = Array.from(map.entries()).map(([id,q]) => ({ id: parseInt(id,10), q }));
+  const newPer100 = new Array(nutrientNames.length).fill(0);
+  let totalQty = 0; compsArr.forEach(c => totalQty += (c.q || 0));
+  if(totalQty <= 0){ alert('Quantidades inválidas.'); return; }
+  const accum = new Array(nutrientNames.length).fill(0);
+  compsArr.forEach(c=>{
+    const compRow = foods.findIndex(ff => String(ff.id) === String(c.id));
+    if(compRow === -1) return;
+    const per100 = computePer100gByRowIndex(compRow, new Set());
+    for(let k=0;k<nutrientNames.length;k++) accum[k] += per100[k] * (c.q / 100);
+  });
+  for(let k=0;k<nutrientNames.length;k++) newPer100[k] = (accum[k] / totalQty) * 100;
+  const newId = getNextId();
+  const newFood = { id: String(newId), name: nome, meals: [], comps: compsArr.map(c => ({ q: c.q, id: c.id })), rowIndex: foods.length, nutRow: newPer100 };
+  foods.push(newFood);
+  nutrientsMatrix = foods.map(f => f.nutRow ? f.nutRow.slice() : new Array(nutrientNames.length).fill(0));
+  const tsv = buildTSVString();
+  downloadTSVAndReload(tsv, `Tabela-Gerada-${nome.replace(/\s+/g,'_')}.tsv`);
+  const newIdx = foods.findIndex(ff => String(ff.id) === String(newId));
+  if(newIdx >= 0) openFoodByRowIndex(newIdx);
+}
+
+/* salvar como refeição */
+function salvarComoRefeicao(itens){
+  if(!itens || itens.length === 0){ alert('Adicione pelo menos um alimento antes de salvar.'); return; }
+  const nome = prompt('Nome da refeição (ex.: Café da Manhã):','Refeição X');
+  if(!nome) return;
+  itens.forEach(it => {
+    const f = foods[it.idx];
+    if(!f) return;
+    const existing = f.meals.find(m => norm(m.meal) === norm(nome));
+    if(existing){ existing.q = (existing.q || 0) + (it.qtd || 0); } else { f.meals.push({ q: (it.qtd || 0), meal: nome }); }
+  });
+  const set = new Set(); foods.forEach(f => f.meals.forEach(m => set.add(m.meal)));
+  mealList = Array.from(set).sort((a,b)=> a.localeCompare(b, 'pt-BR'));
+  mealIndexByName = {}; mealList.forEach((m,i)=> mealIndexByName[m] = i+1);
+  const tsv = buildTSVString();
+  downloadTSVAndReload(tsv, `Tabela-Gerada-Refeicao-${nome.replace(/\s+/g,'_')}.tsv`);
+  openRefeicaoByName(nome);
+}
+
+/* gerar PDF da refeição */
+function gerarPDFRefeicao(itens){
+  if(!itens || itens.length === 0){ alert("Nenhum alimento na refeição."); return; }
+  const nome = prompt("Nome da refeição para o PDF:", "Nova Refeição");
+  if(!nome) return;
+
+  let html = `<div style="font-family: Arial; padding:20px; width:650px;">`;
+  html += `<h1 style="color:#1c6e36;margin-bottom:6px">${esc(nome)}</h1>`;
+  html += `<div style="font-size:13px;color:#444;margin-bottom:12px">Refeição montada em ${new Date().toLocaleString("pt-BR")}</div>`;
+
+  html += `<h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Alimentos</h2>`;
+  html += `<table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px"><tr style="background:#f4f9f4"><th style="text-align:left;padding:6px;border:1px solid #ddd">Alimento</th><th style="text-align:right;padding:6px;border:1px solid #ddd">Quantidade (g)</th></tr>`;
+  itens.forEach(it=> { const f = foods[it.idx]; html += `<tr><td style="padding:6px;border:1px solid #ddd">${esc(f.name)}</td><td style="padding:6px;border:1px solid #ddd;text-align:right">${it.qtd}</td></tr>`; });
+  html += `</table>`;
+
+  // calcula nutrientes totais
+  const totals = new Array(nutrientNames.length).fill(0);
+  itens.forEach(it=>{
+    const per100 = computePer100gByRowIndex(it.idx, new Set());
+    for(let k=0;k<nutrientNames.length;k++) totals[k] += per100[k] * (it.qtd / 100);
+  });
+
+  html += `<h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Nutrientes Totais</h2>`;
+  html += `<table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="background:#f4f9f4"><th style="text-align:left;padding:6px;border:1px solid #ddd">Nutriente</th><th style="text-align:right;padding:6px;border:1px solid #ddd">Total</th><th style="text-align:right;padding:6px;border:1px solid #ddd">% VD</th></tr>`;
+  for(let k=0;k<nutrientNames.length;k++){
+    const total = totals[k];
+    if(!total) continue;
+    const pct = dailyNeeds[k] ? (100 * total / dailyNeeds[k]) : 0;
+    html += `<tr><td style="padding:6px;border:1px solid #ddd">${esc(nutrientNames[k])}</td><td style="padding:6px;border:1px solid #ddd;text-align:right">${total.toFixed(2)}</td><td style="padding:6px;border:1px solid #ddd;text-align:right">${pct.toFixed(1)}%</td></tr>`;
+  }
+  html += `</table></div>`;
+
+  const temp = document.createElement('div'); temp.innerHTML = html; document.body.appendChild(temp);
+  const opt = { margin:10, filename:`${nome.replace(/\s+/g,'_')}.pdf`, image:{type:'jpeg',quality:0.98}, html2canvas:{scale:2}, jsPDF:{unit:'mm',format:'a4',orientation:'portrait'} };
+  html2pdf().set(opt).from(temp).save().then(()=> temp.remove());
+}
+
+/* gerar PDF de 1 alimento */
+function gerarPDFAlimento(rowIndex){
+  const f = foods[rowIndex];
+  if(!f) return;
+
+  const qStr = prompt("Quantidade em gramas para o PDF (ex.: 100):", "100");
+  const qtd = Math.max(0, Number((qStr||"100").replace(',', '.')) || 100);
+
+  const per100 = computePer100gByRowIndex(rowIndex, new Set());
+  const reais = per100.map(v => v * (qtd/100));
+
+  // calorias (assumindo que é sempre a primeira coluna)
+  const kcal = reais[0] ? reais[0].toFixed(2) : "0";
+
+  let html = `
+    <div style="font-family: Arial; width:700px; padding:25px;">
+      <div style="display:flex; gap:16px; align-items:center;">
+        <img src="Alide${f.id}.png"
+             style="width:110px;height:110px;object-fit:cover;border-radius:10px;"
+             onerror="this.style.display='none'">
+        <div>
+          <h1 style="color:#1c6e36; margin:0 0 4px 0;">${esc(f.name)}</h1>
+          <div style="color:#666;font-size:13px;margin-bottom:8px;">ID ${esc(f.id)}</div>
+
+          <!-- CALORIAS DESTACADAS -->
+          <div style="font-size:18px; font-weight:700; color:#1c6e36;">
+            Calorias para ${qtd} g: ${kcal} kcal
+          </div>
+        </div>
+      </div>
+
+      <div style="font-size:14px;color:#444;margin:18px 0;">
+        Quantidade considerada: <b>${qtd} g</b><br>
+        Gerado em ${new Date().toLocaleString("pt-BR")}
+      </div>
+
+      <h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Tabela Nutricional</h2>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:20px;">
+        <tr style="background:#f4f9f4">
+          <th style="text-align:left;padding:6px;border:1px solid #ddd;">Nutriente</th>
+          <th style="text-align:right;padding:6px;border:1px solid #ddd;">Valor</th>
+          <th style="text-align:right;padding:6px;border:1px solid #ddd;">% VD</th>
+        </tr>
+  `;
+
+  for(let k=0;k<nutrientNames.length;k++){
+    const val = reais[k];
+    if(val > 0){
+      const need = dailyNeeds[k] || 0;
+      const pct = need>0 ? (100*val/need).toFixed(1) : "";
+      html += `
+        <tr>
+          <td style="padding:6px;border:1px solid #ddd;">${esc(nutrientNames[k])}</td>
+          <td style="padding:6px;border:1px solid #ddd;text-align:right;">${val.toFixed(2)}</td>
+          <td style="padding:6px;border:1px solid #ddd;text-align:right;">${pct ? pct+'%' : ''}</td>
+        </tr>`;
+    }
+  }
+
+  html += `</table></div>`;
+
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  document.body.appendChild(temp);
+
+  const opt = {
+    margin: [0,0,0,0],
+    filename: `${f.name.replace(/\s+/g,'_')}_${qtd}g.pdf`,
+    image: { type:'jpeg', quality:0.98 },
+    html2canvas: { scale: 2 },
+    jsPDF: { unit:'mm', format:'a4', orientation:'portrait' }
+  };
+
+  html2pdf().set(opt).from(temp).save().then(()=> temp.remove());
+}
+
+
+function gerarPDFAlimento(rowIndex){
+  const f = foods[rowIndex];
+  if (!f) return;
+
+  const qStr = prompt("Quantidade em gramas para o PDF (ex.: 100):", "100");
+  const qtd = Math.max(0, Number((qStr||"100").replace(',', '.')) || 100);
+
+  const per100 = computePer100gByRowIndex(rowIndex, new Set());
+  const reais = per100.map(v => v * (qtd/100));
+
+  const kcal = reais[0] ? reais[0].toFixed(2) : "0";
+
+  let html = `
+    <div style="font-family: Arial; width:700px; padding:25px;">
+      <h1 style="color:#1c6e36; margin:0;">${esc(f.name)}</h1>
+      <div style="margin:4px 0 12px 0; font-size:13px; color:#777;">ID ${esc(f.id)}</div>
+
+      <div style="font-size:18px; font-weight:700; color:#1c6e36; margin-bottom:20px;">
+        Calorias para ${qtd} g: ${kcal} kcal
+      </div>
+
+      <h2 style="color:#1c6e36; margin-top:10px;">Tabela Nutricional</h2>
+      <table style="width:100%; border-collapse:collapse; margin-top:10px;">
+        <tr style="background:#eef7ee;">
+          <th style="border:1px solid #ccc; padding:6px; text-align:left;">Nutriente</th>
+          <th style="border:1px solid #ccc; padding:6px; text-align:right;">Valor</th>
+          <th style="border:1px solid #ccc; padding:6px; text-align:right;">% VD</th>
+        </tr>
+  `;
+
+  for(let k=0;k<nutrientNames.length;k++){
+    const val = reais[k];
+    if(val > 0){
+      const need = dailyNeeds[k] || 0;
+      const pct = need>0 ? (100*val/need).toFixed(1) : "";
+
+      html += `
+        <tr>
+          <td style="border:1px solid #ccc; padding:6px;">${esc(nutrientNames[k])}</td>
+          <td style="border:1px solid #ccc; padding:6px; text-align:right;">${val.toFixed(2)}</td>
+          <td style="border:1px solid #ccc; padding:6px; text-align:right;">${pct ? pct+"%" : ""}</td>
+        </tr>`;
+    }
+  }
+
+  html += `</table></div>`;
+
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  document.body.appendChild(temp);
+
+  const opt = {
+    margin: 0,
+    filename: `${f.name.replace(/\s+/g,'_')}_${qtd}g.pdf`,
+    image: { type:'jpeg', quality:0.98 },
+    html2canvas: { scale: 2 },
+    jsPDF: { unit:'mm', format:'a4', orientation:'portrait' }
+  };
+
+  html2pdf().set(opt).from(temp).save().then(()=> temp.remove());
+}
+
+
+
+/* ---------------- Helpers & events ---------------- */
+function setActiveTab(el){
+  const tabs = el.parentElement.querySelectorAll('.subtab');
+  tabs.forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+}
+
+btnSearch.addEventListener('click', doSearch);
+searchEl.addEventListener('keydown', e=>{ if(e.key === 'Enter') doSearch(); });
+modeEl.addEventListener('change', ()=> {
+  if(!loaded) return;
+  const mode = modeEl.value;
+  if(mode === 'montar'){ renderRefeicaoBuilder(); return; }
+  if(mode === 'alimento'){ const list = foods.map(f=>({name:f.name,id:f.id,idx:f.rowIndex})).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR')); renderThumbs('alimento', list); }
+  else if(mode === 'nutriente'){ const idxs = sortedNutrientIndices(); const list = idxs.map(i=>({name: nutrientNames[i], index: i})); renderThumbs('nutriente', list); }
+  else { const list = mealList.map(n=>({name:n})); renderThumbs('refeicao', list); }
+});
+
+btnND.addEventListener('click', ()=> openND());
+
+/* Start */
+loadTSV();
+</script>
+
+<!-- html2pdf -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+</body>
+</html>
