@@ -43,6 +43,9 @@ header{background:var(--accent); color:#fff; padding:14px 18px; font-size:22px; 
 <body>
 <header>Painel Nutricional</header>
 
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 <div id="topbar">
   <label class="small" for="mode">Buscar por:</label>
   <select id="mode" class="select" aria-label="Modo">
@@ -308,6 +311,66 @@ async function fetchByNameHTML(name){
   return null;
 }
 
+/* ---------------- computeMealsForFood (nova) ----------------
+   Retorna array [{ meal, grams }] com contribuição direta + indireta
+   (procura as refeições onde o alimento aparece, e também se aparece dentro de compostos)
+*/
+function computeMealsForFood(rowIndex){
+  const f = foods[rowIndex];
+  if(!f) return [];
+
+  // compute contribution of this component inside a parent (perc g per 100g of parent)
+  function computeComponentShareInParent(componentId, parentIdx, visited = new Set()){
+    const key = `p${parentIdx}`;
+    if(visited.has(key)) return 0;
+    visited.add(key);
+    const parent = foods[parentIdx];
+    if(!parent || !parent.comps || parent.comps.length === 0) return 0;
+    let totalQty = 0; parent.comps.forEach(c=> totalQty += (c.q||0));
+    if(totalQty <= 0) return 0;
+    let share_g_per100 = 0;
+    for(const c of parent.comps){
+      const compId = String(c.id);
+      const compQty = c.q || 0;
+      const fraction = compQty / totalQty;
+      if(String(compId) === String(componentId)){
+        share_g_per100 += fraction * 100;
+      } else {
+        const compRow = foods.findIndex(ff => String(ff.id) === String(compId));
+        if(compRow !== -1){
+          const childShare = computeComponentShareInParent(componentId, compRow, new Set(visited));
+          share_g_per100 += fraction * (childShare);
+        }
+      }
+    }
+    return share_g_per100;
+  }
+
+  const componentId = String(f.id);
+  const mealMap = new Map();
+
+  // direct meals in f
+  if(f.meals && f.meals.length){
+    f.meals.forEach(m=>{ const prev = mealMap.get(m.meal) || 0; mealMap.set(m.meal, prev + (m.q || 0)); });
+  }
+
+  // search parents that include this as component (directly or nested)
+  foods.forEach((parent, parentIdx) => {
+    if(String(parent.id) === componentId) return;
+    const sharePer100 = computeComponentShareInParent(componentId, parentIdx, new Set());
+    if(sharePer100 <= 0) return;
+    if(parent.meals && parent.meals.length){
+      parent.meals.forEach(m=>{
+        const contrib = (sharePer100/100) * (m.q || 0);
+        const prev = mealMap.get(m.meal) || 0;
+        mealMap.set(m.meal, prev + contrib);
+      });
+    }
+  });
+
+  return Array.from(mealMap.entries()).map(([meal, grams])=>({ meal, grams })).sort((a,b)=> b.grams - a.grams);
+}
+
 /* ---------------- open ND ---------------- */
 async function openND(){
   resultsDiv.innerHTML = '';
@@ -356,7 +419,6 @@ async function openND(){
 }
 
 /* ---------------- open food ---------------- */
-/* ---------------- open food ---------------- */
 async function openFoodByRowIndex(rowIndex){
   const f = foods[rowIndex];
   if(!f) return;
@@ -364,17 +426,6 @@ async function openFoodByRowIndex(rowIndex){
   resultsDiv.innerHTML = '';
   fichaDiv.style.display = 'block';
   fichaDiv.innerHTML = '';
-
-  /* ---------------- BOTÃO PDF NO TOPO ---------------- */
-  const btnTopPDF = document.createElement('button');
-  btnTopPDF.className = 'btn-pdf';
-  btnTopPDF.style.float = "right";
-  btnTopPDF.style.margin = "5px 0";
-  btnTopPDF.textContent = "Baixar PDF deste Alimento";
-  btnTopPDF.onclick = () => gerarPDFAlimento(rowIndex);
-  fichaDiv.appendChild(btnTopPDF);
-  /* --------------------------------------------------- */
-
 
   /* ---------------- CABEÇALHO ---------------- */
   const top = document.createElement('div');
@@ -391,10 +442,17 @@ async function openFoodByRowIndex(rowIndex){
      <div class="small">ID: ${esc(f.id)}</div>
      <div class="note">Ficha do alimento</div>`;
 
+  // BOTÃO PDF no cabeçalho (após info) — garante posicionamento único
+  const btnTopPDF = document.createElement('button');
+  btnTopPDF.className = 'btn-pdf';
+  btnTopPDF.style.marginLeft = '16px';
+  btnTopPDF.textContent = 'Baixar PDF deste Alimento';
+  btnTopPDF.onclick = () => gerarPDFAlimento(rowIndex);
+
   top.appendChild(img);
   top.appendChild(info);
+  top.appendChild(btnTopPDF);
   fichaDiv.appendChild(top);
-
 
   /* ---------------- ABAS ---------------- */
   const tabs = document.createElement('div');
@@ -415,14 +473,12 @@ async function openFoodByRowIndex(rowIndex){
   area.className = 'area';
   fichaDiv.appendChild(area);
 
-
   /* ---------------- AÇÃO: VISÃO GERAL ---------------- */
   tVis.onclick = async () => {
     setActiveTab(tVis);
     const html = await fetchByNameHTML(f.name) || await fetchByNameHTML(`a${f.id}`);
     area.innerHTML = html || `<div class="placeholder">a completar</div>`;
   };
-
 
   /* ---------------- AÇÃO: COMPOSIÇÃO ---------------- */
   tComp.onclick = () => {
@@ -466,12 +522,11 @@ async function openFoodByRowIndex(rowIndex){
     area.appendChild(grid);
   };
 
-
   /* ---------------- AÇÃO: REFEIÇÕES ---------------- */
   tMeals.onclick = () => {
     setActiveTab(tMeals);
 
-    const meals = computeMealsForFood(rowIndex);  // Função já existente
+    const meals = computeMealsForFood(rowIndex);
     if(!meals || meals.length === 0){
       area.innerHTML = `<div class="placeholder">Não há refeições contendo este alimento.</div>`;
       return;
@@ -508,7 +563,6 @@ async function openFoodByRowIndex(rowIndex){
     area.innerHTML = '';
     area.appendChild(grid);
   };
-
 
   /* ---------------- AÇÃO: NUTRIENTES ---------------- */
   tNuts.onclick = () => {
@@ -562,7 +616,6 @@ async function openFoodByRowIndex(rowIndex){
     area.appendChild(grid);
   };
 
-
   /* abrir na aba inicial */
   tVis.click();
 }
@@ -593,7 +646,7 @@ async function openNutrientByIndex(nIdx){
     area.innerHTML = html || `<div class="placeholder">a completar</div>`;
   };
 
-  tAlim.onclick = ()=>{
+  tAlim.onclick = ()=>{ /* ... mantém igual ... */ 
     setActiveTab(tAlim);
     const list = foods.map((f, idx)=>{
       const per100 = computePer100gByRowIndex(idx, new Set());
@@ -672,16 +725,36 @@ async function openNutrientByIndex(nIdx){
 }
 
 /* ---------------- open refeição ---------------- */
+/* (mantive sua versão, sem alterações funcionais) */
 async function openRefeicaoByName(name){
   resultsDiv.innerHTML = '';
   fichaDiv.style.display = 'block';
   fichaDiv.innerHTML = '';
 
+  // --- BOTÃO PDF NO TOPO ---
+  const btnPDF = document.createElement('button');
+  btnPDF.className = "btn-pdf";
+  btnPDF.style.float = "right";
+  btnPDF.style.margin = "5px 0";
+  btnPDF.textContent = "Baixar PDF desta Refeição";
+  btnPDF.onclick = ()=> gerarPDFRefeicao(name);
+  fichaDiv.appendChild(btnPDF);
+
   const mealIx = mealIndexByName[name] || 0;
-  const top = document.createElement('div'); top.className='ficha-top';
-  const imTop = document.createElement('img'); imTop.className='ficha-thumb'; imTop.src = `Rlide${mealIx}.png`; imTop.onerror=()=>imTop.style.display='none';
-  const info = document.createElement('div'); info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha da refeição</div>`;
-  top.appendChild(imTop); top.appendChild(info); fichaDiv.appendChild(top);
+  const top = document.createElement('div'); 
+  top.className='ficha-top';
+
+  const imTop = document.createElement('img'); 
+  imTop.className='ficha-thumb'; 
+  imTop.src = `Rlide${mealIx}.png`; 
+  imTop.onerror=()=>imTop.style.display='none';
+
+  const info = document.createElement('div'); 
+  info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha da refeição</div>`;
+
+  top.appendChild(imTop); 
+  top.appendChild(info); 
+  fichaDiv.appendChild(top);
 
   const tabs = document.createElement('div'); tabs.className='subtabs';
   const tVis = document.createElement('div'); tVis.className='subtab active'; tVis.textContent='Visão Geral';
@@ -689,9 +762,15 @@ async function openRefeicaoByName(name){
   const tNuts = document.createElement('div'); tNuts.className='subtab'; tNuts.textContent='Nutrientes';
   tabs.appendChild(tVis); tabs.appendChild(tAlim); tabs.appendChild(tNuts); fichaDiv.appendChild(tabs);
 
-  const area = document.createElement('div'); area.className='area'; fichaDiv.appendChild(area);
+  const area = document.createElement('div'); 
+  area.className='area'; 
+  fichaDiv.appendChild(area);
 
-  tVis.onclick = async ()=>{ setActiveTab(tVis); const html = await fetchByNameHTML(name); area.innerHTML = html || `<div class="placeholder">a completar</div>`; };
+  tVis.onclick = async ()=>{ 
+    setActiveTab(tVis); 
+    const html = await fetchByNameHTML(name); 
+    area.innerHTML = html || `<div class="placeholder">a completar</div>`; 
+  };
 
   tAlim.onclick = ()=> {
     setActiveTab(tAlim);
@@ -755,10 +834,7 @@ async function openRefeicaoByName(name){
       for(let k=0;k<nutrientNames.length;k++) totals[k] += per100[k] * (it.qtd/100);
     });
 
-    const list = totals.map((v,k)=>({ k, value: v, pct: dailyNeeds[k] ? (100*v/dailyNeeds[k]) : null })).filter(x=>x.value>0).sort((a,b)=>{
-      const pa = a.pct===null?0:a.pct; const pb = b.pct===null?0:b.pct; return pb-pa;
-    });
-
+    const list = totals.map((v,k)=>({ k, value: v, pct: dailyNeeds[k] ? (100*v/dailyNeeds[k]) : null })).filter(x=>x.value>0).sort((a,b)=> (b.pct||0) - (a.pct||0));
     if(list.length === 0){ area.innerHTML = `<div class="placeholder">Nenhum nutriente calculado.</div>`; return; }
     const grid = document.createElement('div'); grid.className='grid-cards';
     list.forEach(it=>{
@@ -776,7 +852,142 @@ async function openRefeicaoByName(name){
   tVis.click();
 }
 
+
+/* gerar PDF da refeição com gráfico de macronutrientes */
+async function gerarPDFRefeicao(itens){
+  if(!itens || itens.length === 0){ 
+    alert("Nenhum alimento na refeição."); 
+    return; 
+  }
+
+  const nome = prompt("Nome da refeição para o PDF:", "Nova Refeição");
+  if(!nome) return;
+
+  // --- CALCULA MACRONUTRIENTES ---
+  const idxProteina = nutrientNames.indexOf("Proteínas_g");
+  const idxGordura  = nutrientNames.indexOf("Gorduras Totais_g");
+  const idxCarb     = nutrientNames.indexOf("Carboidratos_g");
+
+  let totalProteina = 0, totalGordura = 0, totalCarb = 0;
+
+  itens.forEach(it=>{
+    const per100 = computePer100gByRowIndex(it.idx, new Set());
+    if(idxProteina >= 0) totalProteina += per100[idxProteina] * (it.qtd/100);
+    if(idxGordura  >= 0) totalGordura  += per100[idxGordura]  * (it.qtd/100);
+    if(idxCarb     >= 0) totalCarb     += per100[idxCarb]     * (it.qtd/100);
+  });
+
+  // --- CRIA GRÁFICO DE PIZZA ---
+  const canvas = document.createElement("canvas");
+  canvas.width = 600;
+  canvas.height = 400;
+  const ctx = canvas.getContext("2d");
+
+  const dados = [totalProteina, totalGordura, totalCarb];
+  const labels = ["Proteínas", "Gorduras", "Carboidratos"];
+
+  const cores = ["#4caf50", "#ff9800", "#2196f3"];
+  const total = dados.reduce((a,b)=>a+b,0);
+  let angInicio = 0;
+
+  dados.forEach((v, i) => {
+    const angFim = angInicio + (v/total)*2*Math.PI;
+    ctx.beginPath();
+    ctx.moveTo(300,200);
+    ctx.arc(300,200,150, angInicio, angFim);
+    ctx.fillStyle = cores[i];
+    ctx.fill();
+    angInicio = angFim;
+  });
+
+  // legenda
+  ctx.font = "17px Arial";
+  labels.forEach((lab,i)=>{
+    ctx.fillStyle = cores[i];
+    ctx.fillRect(480, 60 + i*35, 20, 20);
+    ctx.fillStyle = "#000";
+    ctx.fillText(`${lab}: ${dados[i].toFixed(1)} g`, 510, 76 + i*35);
+  });
+
+  // imagem final
+  const graficoPNG = canvas.toDataURL("image/png");
+
+  // --- MONTA HTML DO PDF ---
+  let html = `<div style="font-family: Arial; padding:20px; width:650px;">`;
+  html += `<h1 style="color:#1c6e36;margin-bottom:6px">${esc(nome)}</h1>`;
+  html += `<div style="font-size:13px;color:#444;margin-bottom:12px">Refeição gerada em ${new Date().toLocaleString("pt-BR")}</div>`;
+
+  html += `
+  <h2 style="color:#1c6e36;">Distribuição dos Macronutrientes</h2>
+  <img src="${graficoPNG}" style="width:100%;max-width:600px;margin:15px 0;">
+  `;
+
+  html += `<h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Alimentos</h2>`;
+  html += `<table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px">
+  <tr style="background:#f4f9f4">
+    <th style="text-align:left;padding:6px;border:1px solid #ddd">Alimento</th>
+    <th style="text-align:right;padding:6px;border:1px solid #ddd">Quantidade (g)</th>
+  </tr>`;
+
+  itens.forEach(it=>{
+    const f = foods[it.idx];
+    html += `<tr>
+      <td style="padding:6px;border:1px solid #ddd">${esc(f.name)}</td>
+      <td style="padding:6px;border:1px solid #ddd;text-align:right">${it.qtd}</td>
+    </tr>`;
+  });
+
+  html += `</table>`;
+
+  // --- NUTRIENTES TOTAIS ---
+  const totals = new Array(nutrientNames.length).fill(0);
+  itens.forEach(it=>{
+    const per100 = computePer100gByRowIndex(it.idx, new Set());
+    for(let k=0;k<nutrientNames.length;k++) totals[k] += per100[k] * (it.qtd / 100);
+  });
+
+  html += `<h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Nutrientes Totais</h2>`;
+  html += `<table style="width:100%;border-collapse:collapse;font-size:13px">
+  <tr style="background:#f4f9f4">
+    <th style="text-align:left;padding:6px;border:1px solid #ddd">Nutriente</th>
+    <th style="text-align:right;padding:6px;border:1px solid #ddd">Total</th>
+    <th style="text-align:right;padding:6px;border:1px solid #ddd">% VD</th>
+  </tr>`;
+
+  for(let k=0;k<nutrientNames.length;k++){
+    const total = totals[k];
+    if(!total) continue;
+    const pct = dailyNeeds[k] ? (100 * total / dailyNeeds[k]) : 0;
+    html += `<tr>
+      <td style="padding:6px;border:1px solid #ddd">${esc(nutrientNames[k])}</td>
+      <td style="padding:6px;border:1px solid #ddd;text-align:right">${total.toFixed(2)}</td>
+      <td style="padding:6px;border:1px solid #ddd;text-align:right">${pct.toFixed(1)}%</td>
+    </tr>`;
+  }
+  html += `</table></div>`;
+
+  // --- GERA PDF ---
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  document.body.appendChild(temp);
+
+  const opt = {
+    margin: 0,
+    filename: `${nome.replace(/\s+/g,'_')}.pdf`,
+    image: { type:'jpeg', quality:0.98 },
+    html2canvas: { scale: 2 },
+    jsPDF: { unit:'mm', format:'a4', orientation:'portrait' }
+  };
+
+  html2pdf().set(opt).from(temp).save().then(()=> temp.remove());
+}
+
+
+
+
+
 /* ---------------- MONTAR REFEIÇÃO ---------------- */
+/* (mantive sua implementação do builder) */
 function renderRefeicaoBuilder() {
   resultsDiv.innerHTML = '';
   fichaDiv.style.display = 'block';
@@ -978,44 +1189,107 @@ function salvarComoRefeicao(itens){
   openRefeicaoByName(nome);
 }
 
-/* gerar PDF da refeição */
-function gerarPDFRefeicao(itens){
-  if(!itens || itens.length === 0){ alert("Nenhum alimento na refeição."); return; }
-  const nome = prompt("Nome da refeição para o PDF:", "Nova Refeição");
-  if(!nome) return;
+function gerarPDFRefeicao(mealName){
 
+  // --- ENCONTRAR OS ALIMENTOS DA REFEIÇÃO ---
+  const itens = foods
+    .map((f, idx) => {
+      const m = f.meals.find(mm => norm(mm.meal) === norm(mealName));
+      return m ? { f, idx, qtd: m.q } : null;
+    })
+    .filter(Boolean);
+
+  if(itens.length === 0){
+    alert("Nenhum alimento nesta refeição.");
+    return;
+  }
+
+  // --- HTML LAYOUT ---
   let html = `<div style="font-family: Arial; padding:20px; width:650px;">`;
-  html += `<h1 style="color:#1c6e36;margin-bottom:6px">${esc(nome)}</h1>`;
-  html += `<div style="font-size:13px;color:#444;margin-bottom:12px">Refeição montada em ${new Date().toLocaleString("pt-BR")}</div>`;
 
-  html += `<h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Alimentos</h2>`;
-  html += `<table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px"><tr style="background:#f4f9f4"><th style="text-align:left;padding:6px;border:1px solid #ddd">Alimento</th><th style="text-align:right;padding:6px;border:1px solid #ddd">Quantidade (g)</th></tr>`;
-  itens.forEach(it=> { const f = foods[it.idx]; html += `<tr><td style="padding:6px;border:1px solid #ddd">${esc(f.name)}</td><td style="padding:6px;border:1px solid #ddd;text-align:right">${it.qtd}</td></tr>`; });
-  html += `</table>`;
+  html += `
+    <h1 style="color:#1c6e36;margin-bottom:6px">
+      ${esc(mealName)}
+    </h1>
+    <div style="font-size:13px;color:#444;margin-bottom:12px">
+      Gerado em ${new Date().toLocaleString("pt-BR")}
+    </div>
+  `;
 
-  // calcula nutrientes totais
-  const totals = new Array(nutrientNames.length).fill(0);
+  // --- TABELA DE ALIMENTOS ---
+  html += `
+    <h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Alimentos</h2>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px">
+    <tr style="background:#f4f9f4">
+      <th style="text-align:left;padding:6px;border:1px solid #ddd">Alimento</th>
+      <th style="text-align:right;padding:6px;border:1px solid #ddd">Quantidade (g)</th>
+    </tr>
+  `;
+
   itens.forEach(it=>{
-    const per100 = computePer100gByRowIndex(it.idx, new Set());
-    for(let k=0;k<nutrientNames.length;k++) totals[k] += per100[k] * (it.qtd / 100);
+    html += `
+      <tr>
+        <td style="padding:6px;border:1px solid #ddd">${esc(it.f.name)}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:right">${it.qtd}</td>
+      </tr>`;
   });
 
-  html += `<h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Nutrientes Totais</h2>`;
-  html += `<table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="background:#f4f9f4"><th style="text-align:left;padding:6px;border:1px solid #ddd">Nutriente</th><th style="text-align:right;padding:6px;border:1px solid #ddd">Total</th><th style="text-align:right;padding:6px;border:1px solid #ddd">% VD</th></tr>`;
+  html += `</table>`;
+
+  // --- CALCULAR NUTRIENTES ---
+  const totals = new Array(nutrientNames.length).fill(0);
+
+  itens.forEach(it=>{
+    const per100 = computePer100gByRowIndex(it.idx, new Set());
+    for(let k=0;k<nutrientNames.length;k++)
+      totals[k] += per100[k] * (it.qtd / 100);
+  });
+
+  // --- TABELA DE NUTRIENTES ---
+  html += `
+    <h2 style="color:#1c6e36;border-bottom:1px solid #ccc;">Nutrientes Totais</h2>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <tr style="background:#f4f9f4">
+        <th style="text-align:left;padding:6px;border:1px solid #ddd">Nutriente</th>
+        <th style="text-align:right;padding:6px;border:1px solid #ddd">Total</th>
+        <th style="text-align:right;padding:6px;border:1px solid #ddd">% VD</th>
+      </tr>
+  `;
+
   for(let k=0;k<nutrientNames.length;k++){
     const total = totals[k];
     if(!total) continue;
+
     const pct = dailyNeeds[k] ? (100 * total / dailyNeeds[k]) : 0;
-    html += `<tr><td style="padding:6px;border:1px solid #ddd">${esc(nutrientNames[k])}</td><td style="padding:6px;border:1px solid #ddd;text-align:right">${total.toFixed(2)}</td><td style="padding:6px;border:1px solid #ddd;text-align:right">${pct.toFixed(1)}%</td></tr>`;
+
+    html += `
+      <tr>
+        <td style="padding:6px;border:1px solid #ddd">${esc(nutrientNames[k])}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:right">${total.toFixed(2)}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:right">${pct.toFixed(1)}%</td>
+      </tr>`;
   }
+
   html += `</table></div>`;
 
-  const temp = document.createElement('div'); temp.innerHTML = html; document.body.appendChild(temp);
-  const opt = { margin:10, filename:`${nome.replace(/\s+/g,'_')}.pdf`, image:{type:'jpeg',quality:0.98}, html2canvas:{scale:2}, jsPDF:{unit:'mm',format:'a4',orientation:'portrait'} };
+  // --- CONVERTER PARA PDF ---
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  document.body.appendChild(temp);
+
+  const opt = {
+    margin: 0,
+    filename: `Refeição-${mealName.replace(/\s+/g,'_')}.pdf`,
+    image: { type:'jpeg', quality:0.98 },
+    html2canvas: { scale:2 },
+    jsPDF: { unit:'mm', format:'a4', orientation:'portrait' }
+  };
+
   html2pdf().set(opt).from(temp).save().then(()=> temp.remove());
 }
 
-/* gerar PDF de 1 alimento */
+
+/* gerar PDF de 1 alimento (única implementação) */
 function gerarPDFAlimento(rowIndex){
   const f = foods[rowIndex];
   if(!f) return;
@@ -1081,69 +1355,6 @@ function gerarPDFAlimento(rowIndex){
   document.body.appendChild(temp);
 
   const opt = {
-    margin: [0,0,0,0],
-    filename: `${f.name.replace(/\s+/g,'_')}_${qtd}g.pdf`,
-    image: { type:'jpeg', quality:0.98 },
-    html2canvas: { scale: 2 },
-    jsPDF: { unit:'mm', format:'a4', orientation:'portrait' }
-  };
-
-  html2pdf().set(opt).from(temp).save().then(()=> temp.remove());
-}
-
-
-function gerarPDFAlimento(rowIndex){
-  const f = foods[rowIndex];
-  if (!f) return;
-
-  const qStr = prompt("Quantidade em gramas para o PDF (ex.: 100):", "100");
-  const qtd = Math.max(0, Number((qStr||"100").replace(',', '.')) || 100);
-
-  const per100 = computePer100gByRowIndex(rowIndex, new Set());
-  const reais = per100.map(v => v * (qtd/100));
-
-  const kcal = reais[0] ? reais[0].toFixed(2) : "0";
-
-  let html = `
-    <div style="font-family: Arial; width:700px; padding:25px;">
-      <h1 style="color:#1c6e36; margin:0;">${esc(f.name)}</h1>
-      <div style="margin:4px 0 12px 0; font-size:13px; color:#777;">ID ${esc(f.id)}</div>
-
-      <div style="font-size:18px; font-weight:700; color:#1c6e36; margin-bottom:20px;">
-        Calorias para ${qtd} g: ${kcal} kcal
-      </div>
-
-      <h2 style="color:#1c6e36; margin-top:10px;">Tabela Nutricional</h2>
-      <table style="width:100%; border-collapse:collapse; margin-top:10px;">
-        <tr style="background:#eef7ee;">
-          <th style="border:1px solid #ccc; padding:6px; text-align:left;">Nutriente</th>
-          <th style="border:1px solid #ccc; padding:6px; text-align:right;">Valor</th>
-          <th style="border:1px solid #ccc; padding:6px; text-align:right;">% VD</th>
-        </tr>
-  `;
-
-  for(let k=0;k<nutrientNames.length;k++){
-    const val = reais[k];
-    if(val > 0){
-      const need = dailyNeeds[k] || 0;
-      const pct = need>0 ? (100*val/need).toFixed(1) : "";
-
-      html += `
-        <tr>
-          <td style="border:1px solid #ccc; padding:6px;">${esc(nutrientNames[k])}</td>
-          <td style="border:1px solid #ccc; padding:6px; text-align:right;">${val.toFixed(2)}</td>
-          <td style="border:1px solid #ccc; padding:6px; text-align:right;">${pct ? pct+"%" : ""}</td>
-        </tr>`;
-    }
-  }
-
-  html += `</table></div>`;
-
-  const temp = document.createElement('div');
-  temp.innerHTML = html;
-  document.body.appendChild(temp);
-
-  const opt = {
     margin: 0,
     filename: `${f.name.replace(/\s+/g,'_')}_${qtd}g.pdf`,
     image: { type:'jpeg', quality:0.98 },
@@ -1153,8 +1364,6 @@ function gerarPDFAlimento(rowIndex){
 
   html2pdf().set(opt).from(temp).save().then(()=> temp.remove());
 }
-
-
 
 /* ---------------- Helpers & events ---------------- */
 function setActiveTab(el){
@@ -1182,5 +1391,8 @@ loadTSV();
 
 <!-- html2pdf -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<canvas id="graficoPizza" width="400" height="400" style="display:none"></canvas>
+
+
 </body>
 </html>
