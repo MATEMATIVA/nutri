@@ -629,7 +629,8 @@ async function openNutrientByIndex(nIdx){
 
   const top = document.createElement('div'); top.className='ficha-top';
   const imTop = document.createElement('img'); imTop.className='ficha-thumb'; imTop.src = `Nlide${nIdx+1}.png`; imTop.onerror=()=>imTop.style.display='none';
-  const info = document.createElement('div'); info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha do nutriente</div>`;
+  const info = document.createElement('div'); 
+  info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha do nutriente</div>`;
   top.appendChild(imTop); top.appendChild(info); fichaDiv.appendChild(top);
 
   const tabs = document.createElement('div'); tabs.className='subtabs';
@@ -724,6 +725,43 @@ async function openNutrientByIndex(nIdx){
   tVis.click();
 }
 
+function calcularResumoEnergeticoRefeicao(mealName){
+  const idxProt = nutrientNames.findIndex(n => norm(n).includes('proteina'));
+  const idxCarb = nutrientNames.findIndex(n => norm(n).includes('carboidr'));
+  const idxFat  = nutrientNames.findIndex(n => norm(n).includes('gordura'));
+
+  let prot = 0, carb = 0, fat = 0;
+
+  foods.forEach((f, idx) => {
+    const m = f.meals.find(mm => norm(mm.meal) === norm(mealName));
+    if(!m) return;
+
+    const per100 = computePer100gByRowIndex(idx, new Set());
+    const fator = (m.q || 0) / 100;
+
+    if(idxProt >= 0) prot += per100[idxProt] * fator;
+    if(idxCarb >= 0) carb += per100[idxCarb] * fator;
+    if(idxFat  >= 0) fat  += per100[idxFat]  * fator;
+  });
+
+  const kcalProt = prot * 4;
+  const kcalCarb = carb * 4;
+  const kcalFat  = fat  * 9;
+
+  const kcalTotal = kcalProt + kcalCarb + kcalFat || 0;
+
+  return {
+    kcalTotal,
+    pctProt: kcalTotal ? (kcalProt / kcalTotal * 100) : 0,
+    pctCarb: kcalTotal ? (kcalCarb / kcalTotal * 100) : 0,
+    pctFat:  kcalTotal ? (kcalFat  / kcalTotal * 100) : 0
+  };
+}
+
+
+
+
+
 /* ---------------- open refeição ---------------- */
 /* (mantive sua versão, sem alterações funcionais) */
 async function openRefeicaoByName(name){
@@ -749,8 +787,31 @@ async function openRefeicaoByName(name){
   imTop.src = `Rlide${mealIx}.png`; 
   imTop.onerror=()=>imTop.style.display='none';
 
+  const resumo = calcularResumoEnergeticoRefeicao(name);
   const info = document.createElement('div'); 
-  info.innerHTML = `<div class="ficha-name">${esc(name)}</div><div class="note">Ficha da refeição</div>`;
+  const adequado =
+  resumo.pctCarb >= 18 && resumo.pctCarb <= 25 &&
+  resumo.pctProt >= 28 && resumo.pctProt <= 35 &&
+  resumo.pctFat  >= 40 && resumo.pctFat  <= 50;
+
+info.innerHTML = `
+  <div class="ficha-name">${esc(name)}</div>
+
+  <div class="note">
+    <b>${resumo.kcalTotal.toFixed(0)} kcal</b> —
+    Carboidratos: ${resumo.pctCarb.toFixed(1)}%
+      <span style="opacity:.7">(18–25%)</span> ·
+    Proteínas: ${resumo.pctProt.toFixed(1)}%
+      <span style="opacity:.7">(28–35%)</span> ·
+    Gorduras: ${resumo.pctFat.toFixed(1)}%
+      <span style="opacity:.7">(40–50%)</span>
+  </div>
+
+  <div class="note" style="margin-top:4px;font-weight:700;color:${adequado ? '#1c6e36' : '#b00020'}">
+    ${adequado ? 'Distribuição adequada' : 'Distribuição fora do ideal'}
+  </div>
+`;
+
 
   top.appendChild(imTop); 
   top.appendChild(info); 
@@ -1205,8 +1266,9 @@ function gerarPDFRefeicao(mealName){
   }
 
   // --- HTML LAYOUT ---
-  let html = `<div style="font-family: Arial; padding:20px; width:650px;">`;
-
+  let html = `
+    <div style="font-family: Arial; padding:20px; width:650px;">`;
+  
   html += `
     <h1 style="color:#1c6e36;margin-bottom:6px">
       ${esc(mealName)}
